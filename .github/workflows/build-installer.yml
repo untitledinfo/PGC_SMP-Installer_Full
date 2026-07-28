@@ -21,20 +21,20 @@ jobs:
         run: |
           Install-Module -Name ps2exe -Force -Scope CurrentUser
 
-      - name: Compile installer script to .exe
+      - name: Compile GUI installer script to .exe
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Invoke-ps2exe `
-            -inputFile "installer/Install-PGC-SMP.ps1" `
+            -inputFile "installer/Install-PGC-SMP-GUI.ps1" `
             -outputFile "dist/PGC-SMP-Installer.exe" `
             -title "PGC SMP Installer" `
             -description "One-click installer for the PGC SMP modpack" `
             -company "PGC" `
             -product "PGC SMP Installer" `
-            -version "1.0.0.0" `
+            -version "1.1.0.0" `
             -requireAdmin:$false `
-            -noConsole:$false
+            -noConsole:$true
 
       - name: Copy modpack and docs into dist
         shell: pwsh
