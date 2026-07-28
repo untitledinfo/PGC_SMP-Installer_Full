@@ -32,7 +32,7 @@ jobs:
             -description "One-click installer for the PGC SMP modpack" `
             -company "PGC" `
             -product "PGC SMP Installer" `
-            -version "1.1.0.0" `
+            -version "1.2.0.0" `
             -requireAdmin:$false `
             -noConsole:$true
 

@@ -1,6 +1,6 @@
 <#
-    PGC SMP - One-Click Modpack Installer (GUI)
-    ---------------------------------------------
+    PGC SMP - One-Click Modpack Installer (GUI)  v1.2.0
+    ------------------------------------------------------
     Pack   : PGC SMP v1.0.0
     Game   : Minecraft 1.20.1
     Loader : Forge 47.4.20
@@ -16,13 +16,87 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $ErrorActionPreference = "Stop"
-$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$MrpackFile = Join-Path $ScriptDir "PGC_SMP_1_0_0.mrpack"
-$WorkDir    = Join-Path $env:TEMP "PGC_SMP_Install"
-$McVersion  = "1.20.1"
-$ForgeVersion = "47.4.20"
-$ForgeFullVersion = "$McVersion-$ForgeVersion"
-$ForgeVersionId = "$McVersion-forge-$ForgeVersion"
+$AppVersion = "1.2.0"
+
+# ---------------------------------------------------------------------------
+# FIX: resolve the script/exe directory robustly.
+# $MyInvocation.MyCommand.Path is $null once compiled with ps2exe, which was
+# causing "Cannot bind argument to parameter 'Path' because it is null."
+# Falls back to $PSScriptRoot, then to the running process's own exe path.
+# ---------------------------------------------------------------------------
+function Get-AppDir {
+    if ($PSScriptRoot) { return $PSScriptRoot }
+    if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+    try {
+        $procPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if ($procPath) { return (Split-Path -Parent $procPath) }
+    } catch { }
+    return (Get-Location).Path
+}
+
+try {
+    $ScriptDir  = Get-AppDir
+    $MrpackFile = Join-Path $ScriptDir "PGC_SMP_1_0_0.mrpack"
+    $WorkDir    = Join-Path $env:TEMP "PGC_SMP_Install"
+    $SettingsDir = Join-Path $env:APPDATA "PGC_SMP_Installer"
+    $SettingsFile = Join-Path $SettingsDir "settings.json"
+    $McVersion  = "1.20.1"
+    $ForgeVersion = "47.4.20"
+    $ForgeFullVersion = "$McVersion-$ForgeVersion"
+    $ForgeVersionId = "$McVersion-forge-$ForgeVersion"
+} catch {
+    [System.Windows.Forms.MessageBox]::Show("Startup error: $($_.Exception.Message)", "PGC SMP Installer", "OK", "Error") | Out-Null
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Settings persistence (remembers last install path + RAM choice)
+# ---------------------------------------------------------------------------
+function Load-Settings {
+    if (Test-Path $SettingsFile) {
+        try { return (Get-Content $SettingsFile -Raw | ConvertFrom-Json) } catch { }
+    }
+    return [PSCustomObject]@{ LastInstallPath = $null; RamGB = 4; Language = "EN" }
+}
+function Save-Settings($s) {
+    try {
+        New-Item -ItemType Directory -Path $SettingsDir -Force | Out-Null
+        $s | ConvertTo-Json | Set-Content -Path $SettingsFile -Encoding UTF8
+    } catch { }
+}
+$Settings = Load-Settings
+
+# ---------------------------------------------------------------------------
+# Text / simple bilingual labels (EN / Roman Urdu)
+# ---------------------------------------------------------------------------
+$Strings = @{
+    EN = @{
+        Title      = "PGC SMP  -  Minecraft $McVersion  |  Forge $ForgeVersion"
+        Launcher   = "Detected launcher / install folder:"
+        Install    = "Install Path:"
+        InstallBtn = "Install"
+        Cancel     = "Cancel"
+        Uninstall  = "Uninstall"
+        OpenFolder = "Open Folder"
+        SaveLog    = "Save Log"
+        Ram        = "RAM allocation (GB):"
+        Ready      = "Ready."
+    }
+    UR = @{
+        Title      = "PGC SMP  -  Minecraft $McVersion  |  Forge $ForgeVersion"
+        Launcher   = "Launcher / install folder mila:"
+        Install    = "Install Path:"
+        InstallBtn = "Install Karo"
+        Cancel     = "Cancel Karo"
+        Uninstall  = "Uninstall Karo"
+        OpenFolder = "Folder Kholo"
+        SaveLog    = "Log Save Karo"
+        Ram        = "RAM (GB):"
+        Ready      = "Tayyar hai."
+    }
+}
+$Lang = if ($Settings.Language -eq "UR") { "UR" } else { "EN" }
+function T($key) { return $Strings[$Lang][$key] }
 
 # ---------------------------------------------------------------------------
 # Auto-detect Minecraft / launcher install paths
@@ -42,8 +116,6 @@ function Get-DetectedPaths {
         "GDLauncher"     = @( (Join-Path $env:APPDATA "gdlauncher_next") )
         "CurseForge App" = @( (Join-Path $env:USERPROFILE "curseforge\minecraft") )
     }
-
-    # Also check the registry for a custom Official Launcher install location.
     try {
         $regKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Minecraft Launcher"
         if (Test-Path $regKey) {
@@ -64,68 +136,120 @@ function Get-DetectedPaths {
 }
 
 # ---------------------------------------------------------------------------
+# Read the mrpack index once, up front, so we can show real numbers
+# ---------------------------------------------------------------------------
+$PackSummary = $null
+if (Test-Path $MrpackFile) {
+    try {
+        $tmpPreview = Join-Path $WorkDir "preview"
+        New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+        if (Test-Path $tmpPreview) { Remove-Item $tmpPreview -Recurse -Force }
+        Expand-Archive -Path $MrpackFile -DestinationPath $tmpPreview -Force
+        $idx = Get-Content (Join-Path $tmpPreview "modrinth.index.json") -Raw | ConvertFrom-Json
+        $totalBytes = ($idx.files | Measure-Object -Property fileSize -Sum).Sum
+        $PackSummary = [PSCustomObject]@{
+            ModCount  = $idx.files.Count
+            TotalMB   = [math]::Round($totalBytes / 1MB, 1)
+        }
+    } catch { $PackSummary = $null }
+}
+
+# ---------------------------------------------------------------------------
 # Build the form
 # ---------------------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "PGC SMP Installer"
-$form.Size = New-Object System.Drawing.Size(560, 520)
+$form.Text = "PGC SMP Installer v$AppVersion"
+$form.Size = New-Object System.Drawing.Size(580, 610)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "PGC SMP  -  Minecraft $McVersion  |  Forge $ForgeVersion"
+$title.Text = T "Title"
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-$title.Location = New-Object System.Drawing.Point(15, 15)
-$title.Size = New-Object System.Drawing.Size(520, 30)
+$title.Location = New-Object System.Drawing.Point(15, 12)
+$title.Size = New-Object System.Drawing.Size(430, 30)
 $form.Controls.Add($title)
 
+$comboLang = New-Object System.Windows.Forms.ComboBox
+$comboLang.Items.AddRange(@("EN", "UR"))
+$comboLang.SelectedItem = $Lang
+$comboLang.DropDownStyle = "DropDownList"
+$comboLang.Location = New-Object System.Drawing.Point(500, 15)
+$comboLang.Size = New-Object System.Drawing.Size(60, 24)
+$form.Controls.Add($comboLang)
+
+$lblSummary = New-Object System.Windows.Forms.Label
+if ($PackSummary) {
+    $lblSummary.Text = "$($PackSummary.ModCount) mods  -  approx $($PackSummary.TotalMB) MB to download"
+} else {
+    $lblSummary.Text = "PGC_SMP_1_0_0.mrpack not found next to this program."
+}
+$lblSummary.ForeColor = [System.Drawing.Color]::DimGray
+$lblSummary.Location = New-Object System.Drawing.Point(15, 42)
+$lblSummary.Size = New-Object System.Drawing.Size(540, 20)
+$form.Controls.Add($lblSummary)
+
 $lblLauncher = New-Object System.Windows.Forms.Label
-$lblLauncher.Text = "Detected launcher / install folder:"
-$lblLauncher.Location = New-Object System.Drawing.Point(15, 55)
+$lblLauncher.Text = T "Launcher"
+$lblLauncher.Location = New-Object System.Drawing.Point(15, 70)
 $lblLauncher.Size = New-Object System.Drawing.Size(300, 20)
 $form.Controls.Add($lblLauncher)
 
 $comboLaunchers = New-Object System.Windows.Forms.ComboBox
-$comboLaunchers.Location = New-Object System.Drawing.Point(15, 78)
-$comboLaunchers.Size = New-Object System.Drawing.Size(420, 24)
+$comboLaunchers.Location = New-Object System.Drawing.Point(15, 92)
+$comboLaunchers.Size = New-Object System.Drawing.Size(440, 24)
 $comboLaunchers.DropDownStyle = "DropDownList"
 $form.Controls.Add($comboLaunchers)
 
 $btnRescan = New-Object System.Windows.Forms.Button
 $btnRescan.Text = "Rescan"
-$btnRescan.Location = New-Object System.Drawing.Point(445, 77)
+$btnRescan.Location = New-Object System.Drawing.Point(465, 91)
 $btnRescan.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnRescan)
 
 $lblPath = New-Object System.Windows.Forms.Label
-$lblPath.Text = "Install folder:"
-$lblPath.Location = New-Object System.Drawing.Point(15, 112)
+$lblPath.Text = T "Install"
+$lblPath.Location = New-Object System.Drawing.Point(15, 126)
 $lblPath.Size = New-Object System.Drawing.Size(90, 20)
 $form.Controls.Add($lblPath)
 
 $txtPath = New-Object System.Windows.Forms.TextBox
-$txtPath.Location = New-Object System.Drawing.Point(105, 110)
-$txtPath.Size = New-Object System.Drawing.Size(330, 24)
+$txtPath.Location = New-Object System.Drawing.Point(105, 124)
+$txtPath.Size = New-Object System.Drawing.Size(350, 24)
 $form.Controls.Add($txtPath)
 
 $btnBrowse = New-Object System.Windows.Forms.Button
 $btnBrowse.Text = "Browse..."
-$btnBrowse.Location = New-Object System.Drawing.Point(445, 109)
+$btnBrowse.Location = New-Object System.Drawing.Point(465, 123)
 $btnBrowse.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnBrowse)
 
+$lblRam = New-Object System.Windows.Forms.Label
+$lblRam.Text = T "Ram"
+$lblRam.Location = New-Object System.Drawing.Point(15, 158)
+$lblRam.Size = New-Object System.Drawing.Size(140, 20)
+$form.Controls.Add($lblRam)
+
+$numRam = New-Object System.Windows.Forms.NumericUpDown
+$numRam.Location = New-Object System.Drawing.Point(160, 156)
+$numRam.Size = New-Object System.Drawing.Size(60, 24)
+$numRam.Minimum = 2
+$numRam.Maximum = 16
+$numRam.Value = [Math]::Min([Math]::Max([int]$Settings.RamGB, 2), 16)
+$form.Controls.Add($numRam)
+
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(15, 150)
-$progressBar.Size = New-Object System.Drawing.Size(515, 24)
+$progressBar.Location = New-Object System.Drawing.Point(15, 195)
+$progressBar.Size = New-Object System.Drawing.Size(535, 24)
 $progressBar.Minimum = 0
 $progressBar.Maximum = 100
 $form.Controls.Add($progressBar)
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Text = "Ready."
-$lblStatus.Location = New-Object System.Drawing.Point(15, 178)
-$lblStatus.Size = New-Object System.Drawing.Size(515, 20)
+$lblStatus.Text = T "Ready"
+$lblStatus.Location = New-Object System.Drawing.Point(15, 223)
+$lblStatus.Size = New-Object System.Drawing.Size(535, 20)
 $form.Controls.Add($lblStatus)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
@@ -133,22 +257,47 @@ $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$txtLog.Location = New-Object System.Drawing.Point(15, 205)
-$txtLog.Size = New-Object System.Drawing.Size(515, 210)
+$txtLog.Location = New-Object System.Drawing.Point(15, 250)
+$txtLog.Size = New-Object System.Drawing.Size(535, 230)
 $form.Controls.Add($txtLog)
 
 $btnInstall = New-Object System.Windows.Forms.Button
-$btnInstall.Text = "Install"
-$btnInstall.Location = New-Object System.Drawing.Point(360, 425)
-$btnInstall.Size = New-Object System.Drawing.Size(170, 34)
+$btnInstall.Text = T "InstallBtn"
+$btnInstall.Location = New-Object System.Drawing.Point(15, 490)
+$btnInstall.Size = New-Object System.Drawing.Size(120, 34)
 $btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($btnInstall)
+
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Text = T "Cancel"
+$btnCancel.Location = New-Object System.Drawing.Point(145, 490)
+$btnCancel.Size = New-Object System.Drawing.Size(100, 34)
+$btnCancel.Enabled = $false
+$form.Controls.Add($btnCancel)
+
+$btnOpenFolder = New-Object System.Windows.Forms.Button
+$btnOpenFolder.Text = T "OpenFolder"
+$btnOpenFolder.Location = New-Object System.Drawing.Point(255, 490)
+$btnOpenFolder.Size = New-Object System.Drawing.Size(110, 34)
+$btnOpenFolder.Enabled = $false
+$form.Controls.Add($btnOpenFolder)
+
+$btnSaveLog = New-Object System.Windows.Forms.Button
+$btnSaveLog.Text = T "SaveLog"
+$btnSaveLog.Location = New-Object System.Drawing.Point(375, 490)
+$btnSaveLog.Size = New-Object System.Drawing.Size(90, 34)
+$form.Controls.Add($btnSaveLog)
+
+$btnUninstall = New-Object System.Windows.Forms.Button
+$btnUninstall.Text = T "Uninstall"
+$btnUninstall.Location = New-Object System.Drawing.Point(15, 530)
+$btnUninstall.Size = New-Object System.Drawing.Size(535, 28)
+$form.Controls.Add($btnUninstall)
 
 if (-not (Test-Path $MrpackFile)) {
     [System.Windows.Forms.MessageBox]::Show(
         "Could not find PGC_SMP_1_0_0.mrpack next to this program.`nKeep the installer and the .mrpack file in the same folder.",
         "PGC SMP Installer", "OK", "Error") | Out-Null
-    exit 1
 }
 
 function Populate-Launchers {
@@ -169,13 +318,30 @@ Populate-Launchers
 $comboLaunchers.Add_SelectedIndexChanged({
     $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
     $basePath = $script:DetectedPaths[$selectedName]
-    if ($selectedName -like "Official Minecraft Launcher*") {
+    if ($Settings.LastInstallPath -and (Test-Path (Split-Path $Settings.LastInstallPath -Parent))) {
+        $txtPath.Text = $Settings.LastInstallPath
+    } elseif ($selectedName -like "Official Minecraft Launcher*") {
         $txtPath.Text = Join-Path $basePath "PGC_SMP"
     } else {
         $txtPath.Text = $basePath
     }
 })
 $comboLaunchers.SelectedIndex = 0
+
+$comboLang.Add_SelectedIndexChanged({
+    $script:Lang = $comboLang.SelectedItem.ToString()
+    $Settings.Language = $script:Lang
+    $title.Text = T "Title"
+    $lblLauncher.Text = T "Launcher"
+    $lblPath.Text = T "Install"
+    $lblRam.Text = T "Ram"
+    $btnInstall.Text = T "InstallBtn"
+    $btnCancel.Text = T "Cancel"
+    $btnOpenFolder.Text = T "OpenFolder"
+    $btnSaveLog.Text = T "SaveLog"
+    $btnUninstall.Text = T "Uninstall"
+    if (-not $sync -or -not $sync.Status -or $sync.Status -eq "Idle" -or $sync.Done) { $lblStatus.Text = T "Ready" }
+})
 
 $btnRescan.Add_Click({ Populate-Launchers })
 
@@ -185,15 +351,52 @@ $btnBrowse.Add_Click({
     if ($fbd.ShowDialog() -eq "OK") { $txtPath.Text = $fbd.SelectedPath }
 })
 
+$btnOpenFolder.Add_Click({
+    if (Test-Path $txtPath.Text) { Start-Process explorer.exe $txtPath.Text }
+})
+
+$btnSaveLog.Add_Click({
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "Text file (*.txt)|*.txt"
+    $sfd.FileName = "PGC_SMP_install_log.txt"
+    if ($sfd.ShowDialog() -eq "OK") { $txtLog.Text | Set-Content -Path $sfd.FileName -Encoding UTF8 }
+})
+
+$btnUninstall.Add_Click({
+    $target = $txtPath.Text
+    if (-not (Test-Path $target)) {
+        [System.Windows.Forms.MessageBox]::Show("Nothing installed at:`n$target", "PGC SMP Installer", "OK", "Information") | Out-Null
+        return
+    }
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "This will permanently delete:`n$target`n`nAnd remove the 'PGC SMP' launcher profile if present. Continue?",
+        "Confirm Uninstall", "YesNo", "Warning")
+    if ($confirm -ne "Yes") { return }
+    try {
+        Remove-Item -Path $target -Recurse -Force
+        $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
+        if ($selectedName -like "Official Minecraft Launcher*") {
+            $dotMc = $script:DetectedPaths[$selectedName]
+            $profilesFile = Join-Path $dotMc "launcher_profiles.json"
+            if (Test-Path $profilesFile) {
+                $pj = Get-Content $profilesFile -Raw | ConvertFrom-Json
+                if ($pj.profiles.PSObject.Properties.Name -contains "PGC_SMP") {
+                    $pj.profiles.PSObject.Properties.Remove("PGC_SMP")
+                    $pj | ConvertTo-Json -Depth 10 | Set-Content -Path $profilesFile -Encoding UTF8
+                }
+            }
+        }
+        [System.Windows.Forms.MessageBox]::Show("PGC SMP has been uninstalled.", "PGC SMP Installer", "OK", "Information") | Out-Null
+        $btnOpenFolder.Enabled = $false
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Uninstall failed: $($_.Exception.Message)", "PGC SMP Installer", "OK", "Error") | Out-Null
+    }
+})
+
 function Append-Log($msg) {
     $txtLog.AppendText("$msg`r`n")
     $txtLog.SelectionStart = $txtLog.Text.Length
     $txtLog.ScrollToCaret()
-}
-
-function Get-FileSha1($path) {
-    if (-not (Test-Path $path)) { return $null }
-    return (Get-FileHash -Path $path -Algorithm SHA1).Hash.ToLower()
 }
 
 # ---------------------------------------------------------------------------
@@ -205,10 +408,14 @@ $sync = [hashtable]::Synchronized(@{
     Status   = "Idle"
     Done     = $false
     Failed   = $false
+    Cancel   = $false
+    OkCount  = 0
+    FailCount = 0
+    SkipCount = 0
 })
 
 $installScript = {
-    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft)
+    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft, $RamGB)
 
     function Log($m)      { $sync.Log.Add($m) | Out-Null }
     function SetProgress($p) { $sync.Progress = [int]$p }
@@ -218,6 +425,22 @@ $installScript = {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $InstallDir "mods") -Force | Out-Null
         New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+
+        SetStatus "Checking disk space..."
+        $extractDirCheck = Join-Path $WorkDir "extracted"
+        $tmpZip = Join-Path $WorkDir "pgc_smp.zip"
+        Copy-Item $MrpackFile $tmpZip -Force
+        if (Test-Path $extractDirCheck) { Remove-Item $extractDirCheck -Recurse -Force }
+        Expand-Archive -Path $tmpZip -DestinationPath $extractDirCheck -Force
+        $indexPreview = Get-Content (Join-Path $extractDirCheck "modrinth.index.json") -Raw | ConvertFrom-Json
+        $neededBytes = ($indexPreview.files | Measure-Object -Property fileSize -Sum).Sum
+        try {
+            $drive = (Get-Item $InstallDir).PSDrive
+            $freeBytes = (Get-PSDrive $drive.Name).Free
+            if ($freeBytes -lt ($neededBytes * 1.3)) {
+                Log "[!] Low disk space warning: need roughly $([math]::Round($neededBytes/1MB,0)) MB, only $([math]::Round($freeBytes/1MB,0)) MB free."
+            }
+        } catch { }
 
         if ($UseOfficial) {
             SetStatus "Checking Java..."
@@ -245,7 +468,7 @@ $installScript = {
                 Log "[OK] Forge installer downloaded."
 
                 SetStatus "Installing Forge (this can take a minute)..."
-                $proc = Start-Process -FilePath "java" -ArgumentList @("-jar", "`"$forgeJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -NoNewWindow
+                $proc = Start-Process -FilePath "java" -ArgumentList @("-jar", "`"$forgeJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
                 if ($proc.ExitCode -ne 0 -or -not (Test-Path $versionFolder)) {
                     Log "[X] Forge install may have failed (exit code $($proc.ExitCode)). You can run forge-installer.jar manually from $WorkDir and choose 'Install Client'."
                 } else {
@@ -254,21 +477,19 @@ $installScript = {
             }
         }
         SetProgress 10
+        if ($sync.Cancel) { Log "[!] Cancelled."; $sync.Done = $true; return }
 
         SetStatus "Unpacking modpack..."
-        $extractDir = Join-Path $WorkDir "extracted"
-        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-        $zipCopy = Join-Path $WorkDir "pgc_smp.zip"
-        Copy-Item $MrpackFile $zipCopy -Force
-        Expand-Archive -Path $zipCopy -DestinationPath $extractDir -Force
-        Log "[OK] Modpack unpacked."
+        $extractDir = $extractDirCheck
+        Log "[OK] Modpack unpacked. $($indexPreview.files.Count) mods, approx $([math]::Round($neededBytes/1MB,1)) MB."
         SetProgress 15
 
-        $index = Get-Content (Join-Path $extractDir "modrinth.index.json") -Raw | ConvertFrom-Json
+        $index = $indexPreview
         $total = $index.files.Count
         $i = 0
         SetStatus "Downloading mods (0/$total)..."
         foreach ($file in $index.files) {
+            if ($sync.Cancel) { Log "[!] Cancelled by user."; break }
             $i++
             $relPath = $file.path -replace "/", "\"
             $destPath = Join-Path $InstallDir $relPath
@@ -285,13 +506,14 @@ $installScript = {
             if ($needsDownload) {
                 $attempt = 0
                 $ok = $false
-                while ($attempt -lt 3 -and -not $ok) {
+                while ($attempt -lt 3 -and -not $ok -and -not $sync.Cancel) {
                     $attempt++
                     try {
                         Invoke-WebRequest -Uri $file.downloads[0] -OutFile $destPath -UseBasicParsing
                         $actualSha1 = (Get-FileHash -Path $destPath -Algorithm SHA1).Hash.ToLower()
                         if (-not $expectedSha1 -or $actualSha1 -eq $expectedSha1) {
                             $ok = $true
+                            $sync.OkCount++
                             Log "[$i/$total] downloaded: $($file.path)"
                         } else {
                             Log "[$i/$total] hash mismatch (attempt $attempt): $($file.path)"
@@ -300,13 +522,16 @@ $installScript = {
                         Log "[$i/$total] retry $attempt failed: $($file.path) - $($_.Exception.Message)"
                     }
                 }
-                if (-not $ok) { Log "[X] Giving up on $($file.path) after 3 attempts." }
+                if (-not $ok -and -not $sync.Cancel) { Log "[X] Giving up on $($file.path) after 3 attempts."; $sync.FailCount++ }
             } else {
+                $sync.SkipCount++
                 Log "[$i/$total] already up to date: $($file.path)"
             }
             SetStatus "Downloading mods ($i/$total)..."
             SetProgress (15 + [math]::Floor((70.0 * $i / [math]::Max($total,1))))
         }
+
+        if ($sync.Cancel) { $sync.Done = $true; return }
 
         SetStatus "Copying bundled mods, configs and datapacks..."
         $overridesDir = Join-Path $extractDir "overrides"
@@ -345,11 +570,11 @@ $installScript = {
                 icon          = "Furnace"
                 lastVersionId = $ForgeVersionId
                 gameDir       = $InstallDir
-                javaArgs      = "-Xmx4G -Xms2G"
+                javaArgs      = "-Xmx${RamGB}G -Xms1G"
             }
             $profilesJson.profiles | Add-Member -MemberType NoteProperty -Name "PGC_SMP" -Value $newProfile -Force
             $profilesJson | ConvertTo-Json -Depth 10 | Set-Content -Path $profilesFile -Encoding UTF8
-            Log "[OK] 'PGC SMP' profile registered in the Official Launcher."
+            Log "[OK] 'PGC SMP' profile registered in the Official Launcher ($RamGB GB RAM)."
         } else {
             Log "[OK] Files placed in: $InstallDir"
             Log "     If your launcher needs manual import, point it at this folder."
@@ -358,7 +583,7 @@ $installScript = {
         SetProgress 100
         SetStatus "Done!"
         Log ""
-        Log "=== Installation complete ==="
+        Log "=== Installation complete: $($sync.OkCount) downloaded, $($sync.SkipCount) already up to date, $($sync.FailCount) failed ==="
     } catch {
         Log "[X] Fatal error: $($_.Exception.Message)"
         $sync.Failed = $true
@@ -369,25 +594,34 @@ $installScript = {
 
 $btnInstall.Add_Click({
     $btnInstall.Enabled = $false
+    $btnCancel.Enabled = $true
     $comboLaunchers.Enabled = $false
     $btnBrowse.Enabled = $false
     $btnRescan.Enabled = $false
+    $btnUninstall.Enabled = $false
     $txtLog.Clear()
     $sync.Log.Clear()
     $sync.Progress = 0
     $sync.Done = $false
     $sync.Failed = $false
+    $sync.Cancel = $false
+    $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0
 
     $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
     $useOfficial = $selectedName -like "Official Minecraft Launcher*"
     $dotMinecraft = $script:DetectedPaths[$selectedName]
     $installDir = $txtPath.Text
+    $ramGB = [int]$numRam.Value
+
+    $Settings.LastInstallPath = $installDir
+    $Settings.RamGB = $ramGB
+    Save-Settings $Settings
 
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($MrpackFile).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft) | Out-Null
+    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($MrpackFile).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB) | Out-Null
     $asyncResult = $ps.BeginInvoke()
 
     $timer = New-Object System.Windows.Forms.Timer
@@ -403,14 +637,19 @@ $btnInstall.Add_Click({
 
         if ($sync.Done) {
             $timer.Stop()
-            $ps.EndInvoke($asyncResult) | Out-Null
+            try { $ps.EndInvoke($asyncResult) | Out-Null } catch { }
             $ps.Dispose()
             $rs.Close()
             $btnInstall.Enabled = $true
+            $btnCancel.Enabled = $false
             $comboLaunchers.Enabled = $true
             $btnBrowse.Enabled = $true
             $btnRescan.Enabled = $true
-            if ($sync.Failed) {
+            $btnUninstall.Enabled = $true
+            if (Test-Path $installDir) { $btnOpenFolder.Enabled = $true }
+            if ($sync.Cancel) {
+                [System.Windows.Forms.MessageBox]::Show("Installation cancelled.", "PGC SMP Installer", "OK", "Warning") | Out-Null
+            } elseif ($sync.Failed) {
                 [System.Windows.Forms.MessageBox]::Show("Installation finished with errors - check the log.", "PGC SMP Installer", "OK", "Warning") | Out-Null
             } else {
                 [System.Windows.Forms.MessageBox]::Show("Done! Open your launcher and pick the 'PGC SMP' profile.", "PGC SMP Installer", "OK", "Information") | Out-Null
@@ -418,6 +657,16 @@ $btnInstall.Add_Click({
         }
     })
     $timer.Start()
+})
+
+$btnCancel.Add_Click({
+    $sync.Cancel = $true
+    $lblStatus.Text = "Cancelling..."
+})
+
+$form.Add_FormClosing({
+    $Settings.RamGB = [int]$numRam.Value
+    Save-Settings $Settings
 })
 
 [System.Windows.Forms.Application]::Run($form)

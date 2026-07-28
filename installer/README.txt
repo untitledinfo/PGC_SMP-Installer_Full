@@ -1,6 +1,29 @@
-PGC SMP - One Click Installer (GUI)
-======================================
+PGC SMP - One Click Installer (GUI) v1.2.0
+=============================================
 Minecraft 1.20.1  |  Forge 47.4.20
+
+BUG FIX IN THIS VERSION
+------------------------
+Fixed: "Cannot bind argument to parameter 'Path' because it is null."
+Cause: the compiled .exe couldn't resolve its own folder location, so the
+installer couldn't find PGC_SMP_1_0_0.mrpack next to it. The script now
+resolves its folder through $PSScriptRoot with a process-path fallback,
+so it works both as a raw .ps1 and as the compiled .exe.
+
+NEW IN THIS VERSION
+---------------------
+- RAM allocation selector (2-16 GB) written into the launcher profile
+- Cancel button - stops an in-progress install cleanly
+- Uninstall button - removes the install folder and the launcher profile
+- Open Folder button - jumps straight to the installed files
+- Save Log button - export the log for troubleshooting/support
+- Mod count + total download size shown before you even click Install
+- Disk space check before downloading starts, with a warning if it's tight
+- Remembers your last install path and RAM choice between runs
+- Install summary at the end: downloaded / already up to date / failed counts
+- EN / UR language toggle for the interface labels
+- Forge installer now runs hidden instead of relying on -NoNewWindow, which
+  could misbehave in a console-less compiled .exe
 
 HOW TO INSTALL
 --------------
@@ -9,58 +32,24 @@ HOW TO INSTALL
      - Install-PGC-SMP-GUI.ps1
      - PGC_SMP_1_0_0.mrpack
 
-2. Double-click "Install PGC SMP.bat" - a window opens.
-   (Windows may show a blue "Windows protected your PC" popup the first
-   time you run a script from an unknown publisher - click "More info"
-   then "Run anyway". Normal for any unsigned script.)
-
-3. The app auto-detects any Minecraft launcher already on your PC and
-   pre-fills the install folder. You can pick a different detected
-   launcher from the dropdown, or click "Browse..." to choose your own
-   folder. Click Rescan any time.
-
-4. Click "Install" and watch the log + progress bar. It downloads ~80
-   mods (verified against checksums) and copies configs/datapacks in.
-
-5. Open the Minecraft Launcher, sign in with your Microsoft account
-   (must own Minecraft - see note below), pick "PGC SMP" from the
-   profile dropdown, and click Play.
+2. Double-click "Install PGC SMP.bat".
+3. Pick your launcher (auto-detected) and RAM, then click Install.
+4. Open the Minecraft Launcher, sign in with your Microsoft account,
+   pick "PGC SMP", and click Play.
 
 ACCOUNTS
 --------
-This installer sets up the Official Minecraft Launcher and legitimate
+Supports the Official Launcher (paid/Microsoft account) and legitimate
 third-party launchers (Prism, MultiMC, ATLauncher, GDLauncher, Modrinth
-App, CurseForge). All of these need a Minecraft account you actually
-own - there's no offline/cracked-account mode, since the PGC server
-requires real, owned accounts.
-
-WHAT'S NEW IN THIS VERSION
----------------------------
-- Real GUI: dropdown launcher picker, progress bar, live log, browse button
-- Wider auto-detection: registry-based custom install paths, common
-  alternate drive locations, all major legitimate launchers
-- SHA-1 checksum verification on every downloaded mod, with automatic
-  retry (3 attempts) for anything that fails or doesn't match
-- Skips files that are already correctly installed - safe to re-run
-- Background install worker so the window never freezes
-- Backs up your existing launcher_profiles.json before editing it
-- Fixed the profile-registration bug from the previous console version
+App, CurseForge) using their own real sign-in. No offline/cracked mode -
+the server requires owned accounts.
 
 REQUIREMENTS
 ------------
 - Windows 10/11 with PowerShell (built in)
-- A Minecraft account you own, signed into your chosen launcher
-- Java 17+ for the Official Launcher path (installer checks and opens
-  the download page for you if missing)
+- A Minecraft account you own
+- Java 17+ for the Official Launcher path (checked automatically)
 - Internet connection (mods total roughly 1-2 GB)
-
-OTHER LAUNCHERS
-----------------
-Prism Launcher, MultiMC, ATLauncher, GDLauncher and the Modrinth App can
-all import the .mrpack file directly via their own "Add Instance /
-Import" button - the GUI tells you when it detects one of these and you
-can pick it from the dropdown to have this installer place the files
-for you instead, if you'd rather not use their importer.
 
 TROUBLESHOOTING
 ----------------
@@ -68,4 +57,4 @@ TROUBLESHOOTING
   from %TEMP%\PGC_SMP_Install and choose "Install Client".
 - A mod keeps failing after 3 retries: check your connection and click
   Install again - it only re-downloads what's missing or mismatched.
-- Still stuck: ask in the PGC Discord with the exact log line shown.
+- Still stuck: use Save Log and share it in the PGC Discord.
