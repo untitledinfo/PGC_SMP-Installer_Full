@@ -1,29 +1,38 @@
-PGC SMP - One Click Installer (GUI) v1.2.0
+PGC SMP - One Click Installer (GUI) v1.3.0
 =============================================
 Minecraft 1.20.1  |  Forge 47.4.20
 
-BUG FIX IN THIS VERSION
-------------------------
-Fixed: "Cannot bind argument to parameter 'Path' because it is null."
-Cause: the compiled .exe couldn't resolve its own folder location, so the
-installer couldn't find PGC_SMP_1_0_0.mrpack next to it. The script now
-resolves its folder through $PSScriptRoot with a process-path fallback,
-so it works both as a raw .ps1 and as the compiled .exe.
+WHAT CHANGED IN THIS VERSION
+------------------------------
+- Removed the old "preview" step that extracted the whole pack to a temp
+  folder just to count mods. It now reads modrinth.index.json straight out
+  of the .mrpack zip in memory - faster, and always reflects the real file,
+  never a stale leftover extraction.
+- Live console: the log is now colour-coded (green = success, red = failed,
+  yellow = warning) and the status line updates in real time per file -
+  percent complete, MB downloaded / total, and current speed - instead of
+  only showing a line once a file finishes.
+- Modrinth API integration: mod names shown in the log and in the new
+  "Mods included" list are the real project titles from Modrinth
+  (api.modrinth.com), not raw jar filenames. Falls back to filenames
+  automatically if you're offline when the app starts - never blocks
+  the installer.
+- Optional GitHub self-update check: if you set $GithubRepo near the top
+  of Install-PGC-SMP-GUI.ps1 to "yourname/yourrepo", the app checks your
+  latest GitHub Release on startup and shows a banner if a newer version
+  exists. Left blank by default - no network call, no dependency on you
+  having a repo.
+- Mods included list box so players can see exactly what's in the pack
+  before clicking Install.
+- Overrides (bundled mods/configs/datapacks) are extracted and copied
+  automatically - no manual paste required, same as before, just faster.
 
-NEW IN THIS VERSION
----------------------
-- RAM allocation selector (2-16 GB) written into the launcher profile
-- Cancel button - stops an in-progress install cleanly
-- Uninstall button - removes the install folder and the launcher profile
-- Open Folder button - jumps straight to the installed files
-- Save Log button - export the log for troubleshooting/support
-- Mod count + total download size shown before you even click Install
-- Disk space check before downloading starts, with a warning if it's tight
-- Remembers your last install path and RAM choice between runs
-- Install summary at the end: downloaded / already up to date / failed counts
-- EN / UR language toggle for the interface labels
-- Forge installer now runs hidden instead of relying on -NoNewWindow, which
-  could misbehave in a console-less compiled .exe
+CARRIED OVER FROM v1.2.0
+--------------------------
+- RAM allocation selector, Cancel, Uninstall, Open Folder, Save Log
+- Disk space check, SHA-1 verification with 3 retries, skip-if-current
+- EN / UR language toggle, remembers last install path + RAM
+- Fixed exe path-resolution crash from the console version
 
 HOW TO INSTALL
 --------------
@@ -33,23 +42,23 @@ HOW TO INSTALL
      - PGC_SMP_1_0_0.mrpack
 
 2. Double-click "Install PGC SMP.bat".
-3. Pick your launcher (auto-detected) and RAM, then click Install.
-4. Open the Minecraft Launcher, sign in with your Microsoft account,
-   pick "PGC SMP", and click Play.
+3. Check the mod list, pick your launcher (auto-detected) and RAM.
+4. Click Install and watch the live log.
+5. Open the Minecraft Launcher, sign in, pick "PGC SMP", click Play.
 
 ACCOUNTS
 --------
 Supports the Official Launcher (paid/Microsoft account) and legitimate
-third-party launchers (Prism, MultiMC, ATLauncher, GDLauncher, Modrinth
-App, CurseForge) using their own real sign-in. No offline/cracked mode -
-the server requires owned accounts.
+third-party launchers using their own real sign-in. No offline/cracked
+mode - the server requires owned accounts.
 
 REQUIREMENTS
 ------------
 - Windows 10/11 with PowerShell (built in)
 - A Minecraft account you own
 - Java 17+ for the Official Launcher path (checked automatically)
-- Internet connection (mods total roughly 1-2 GB)
+- Internet connection (mods total roughly 1-2 GB; Modrinth API name
+  lookup needs internet too, but skips itself gracefully if offline)
 
 TROUBLESHOOTING
 ----------------

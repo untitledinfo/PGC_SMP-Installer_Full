@@ -1,0 +1,62 @@
+name: Build PGC SMP Installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "installer/**"
+      - ".github/workflows/build-installer.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ps2exe
+        shell: pwsh
+        run: |
+          Install-Module -Name ps2exe -Force -Scope CurrentUser
+
+      - name: Compile GUI installer script to .exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Invoke-ps2exe `
+            -inputFile "installer/Install-PGC-SMP-GUI.ps1" `
+            -outputFile "dist/PGC-SMP-Installer.exe" `
+            -title "PGC SMP Installer" `
+            -description "One-click installer for the PGC SMP modpack" `
+            -company "PGC" `
+            -product "PGC SMP Installer" `
+            -version "1.2.0.0" `
+            -requireAdmin:$false `
+            -noConsole:$true
+
+      - name: Copy modpack and docs into dist
+        shell: pwsh
+        run: |
+          Copy-Item "installer/PGC_SMP_1_0_0.mrpack" "dist/PGC_SMP_1_0_0.mrpack"
+          Copy-Item "installer/README.txt" "dist/README.txt"
+
+      - name: Zip release bundle
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/*" -DestinationPath "PGC_SMP_Installer.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PGC-SMP-Installer
+          path: PGC_SMP_Installer.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PGC_SMP_Installer.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
