@@ -24,6 +24,19 @@ $AppVersion = "1.3.0"
 # check on startup. Left blank = feature silently skipped, no network call.
 $GithubRepo = ""
 
+# Defense in depth: this is the one place that ever calls a WinForms
+# .Items.Add() with a value that might legitimately be null (a hashtable
+# lookup, an API result, etc). Routing every such call through here means
+# the exact "Add": "Value cannot be null. Parameter name: item" crash this
+# script used to hit can't happen again, even if the upstream logic that
+# builds the value changes later and reintroduces a gap.
+function Add-SafeListItem($control, $item) {
+    if ([string]::IsNullOrWhiteSpace([string]$item)) {
+        return
+    }
+    try { [void]$control.Items.Add($item) } catch { }
+}
+
 function Get-AppDir {
     if ($PSScriptRoot) { return $PSScriptRoot }
     if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
@@ -185,16 +198,56 @@ if (Test-Path $MrpackFile) {
             TotalMB  = [math]::Round($totalBytes / 1MB, 1)
         }
         $projNames = Get-ModrinthNames $PackIndex
+    } catch {
+        # Reading the index/summary itself failed (corrupt zip, unreadable
+        # modrinth.index.json, etc). Reset everything together so the rest of
+        # the script sees a clean "no pack loaded" state instead of a
+        # half-populated one - this is what previously let $PackIndex stay
+        # set while $ModDisplayNames was left incomplete, which is what
+        # caused the "Add": "Value cannot be null. Parameter name: item"
+        # crash further down when the mod list tried to render.
+        $PackIndex = $null
+        $PackSummary = $null
+        $projNames = @{}
+    }
+
+    # BUGFIX: this used to live inside the try/catch above as one unit, so a
+    # single bad entry (missing/odd path, a lookup failure, etc.) could throw
+    # partway through and leave $ModDisplayNames with holes for the remaining
+    # files, while $PackIndex stayed set — that mismatch is exactly what let
+    # a $null reach $listMods.Items.Add() later. Each file is now resolved
+    # independently: whatever happens, every file that exists in $PackIndex
+    # gets *some* non-null display name.
+    if ($PackIndex) {
         foreach ($f in $PackIndex.files) {
             $friendly = $null
-            if ($f.downloads -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
-                $pid = $matches[1]
-                if ($projNames.ContainsKey($pid)) { $friendly = $projNames[$pid] }
+            try {
+                if ($f.downloads -and $f.downloads.Count -gt 0 -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
+                    # NOTE: this used to be named $pid, which is a *read-only* PowerShell
+                    # automatic variable (the current process ID). Assigning to it throws
+                    # "Cannot overwrite variable PID because it is read-only or constant"
+                    # on literally the first Modrinth-hosted file in the pack — which is why
+                    # this crashed every single run, not just sometimes.
+                    $projectId = $matches[1]
+                    if ($projNames -and $projNames.ContainsKey($projectId)) { $friendly = $projNames[$projectId] }
+                }
+            } catch {
+                # name-lookup failed for this one file only - fall through to the
+                # filename-based fallback below, don't let it affect other files
             }
-            if (-not $friendly) { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) }
-            $ModDisplayNames[$f.path] = $friendly
+
+            if ([string]::IsNullOrWhiteSpace($friendly)) {
+                if (-not [string]::IsNullOrWhiteSpace($f.path)) {
+                    try { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) } catch { $friendly = $f.path }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($friendly)) { $friendly = "(unnamed file)" }
+
+            if (-not [string]::IsNullOrWhiteSpace($f.path)) {
+                $ModDisplayNames[$f.path] = $friendly
+            }
         }
-    } catch { $PackSummary = $null }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -315,7 +368,7 @@ $listMods.Location = New-Object System.Drawing.Point(15, 227)
 $listMods.Size = New-Object System.Drawing.Size(575, 90)
 if ($PackIndex) {
     foreach ($f in ($PackIndex.files | Sort-Object { $ModDisplayNames[$_.path] })) {
-        $listMods.Items.Add($ModDisplayNames[$f.path]) | Out-Null
+        Add-SafeListItem $listMods $ModDisplayNames[$f.path]
     }
 }
 $form.Controls.Add($listMods)
@@ -386,11 +439,11 @@ function Populate-Launchers {
     $comboLaunchers.Items.Clear()
     $script:DetectedPaths = Get-DetectedPaths
     if ($script:DetectedPaths.Count -eq 0) {
-        $comboLaunchers.Items.Add("Official Minecraft Launcher (not found - will create)") | Out-Null
+        Add-SafeListItem $comboLaunchers "Official Minecraft Launcher (not found - will create)"
         $script:DetectedPaths["Official Minecraft Launcher (not found - will create)"] = (Join-Path $env:APPDATA ".minecraft")
     } else {
         foreach ($name in $script:DetectedPaths.Keys) {
-            $comboLaunchers.Items.Add("$name  ->  $($script:DetectedPaths[$name])") | Out-Null
+            Add-SafeListItem $comboLaunchers "$name  ->  $($script:DetectedPaths[$name])"
         }
     }
     $comboLaunchers.SelectedIndex = 0
