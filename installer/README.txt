@@ -69,12 +69,21 @@ TROUBLESHOOTING
 - Still stuck: use Save Log and share it in the PGC Discord.
 
 ------------------------------------------------------------
-v1.4.0 update: "Select .mrpack..." button
+v1.5.0 update: modpack fixes + faster installs
 ------------------------------------------------------------
-The installer no longer requires PGC_SMP_1_0_0.mrpack to sit
-next to it. A new "Select .mrpack..." button (top of the
-window) lets you browse to any .mrpack file on disk. Pick one
-and the mod list / size summary refresh automatically. If the
-bundled .mrpack is present, it's still auto-loaded on startup
-as before - the button is only needed to point at a different
-pack or file location.
+- Fixed: the installer used to hardcode Minecraft 1.20.1 /
+  Forge 47.4.20 no matter which .mrpack was loaded, so picking
+  a different pack via "Select .mrpack..." could try to install
+  the wrong Forge version. It now reads the real Minecraft +
+  loader version straight out of each pack's own
+  modrinth.index.json every time a pack is loaded or selected.
+- Added: NeoForge packs are now auto-installed the same way
+  Forge packs are. Fabric/Quilt packs aren't auto-installed yet
+  (no loader-installer step for those loaders) - the installer
+  says so clearly, still downloads all mods/configs/overrides,
+  and skips creating a broken launcher profile until you add
+  the loader yourself.
+- Faster: mods now download up to 6 at a time instead of one at
+  a time, using the same retry + SHA1 verification as before.
+  On a typical pack this cuts total download time significantly
+  versus sequential downloads.

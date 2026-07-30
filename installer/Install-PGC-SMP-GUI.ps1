@@ -1,5 +1,5 @@
 <#
-    PGC SMP - One-Click Modpack Installer (GUI)  v1.4.0
+    PGC SMP - One-Click Modpack Installer (GUI)  v1.5.0
     ------------------------------------------------------
     Pack   : PGC SMP v1.0.0
     Game   : Minecraft 1.20.1
@@ -18,7 +18,7 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $ErrorActionPreference = "Stop"
-$AppVersion = "1.4.0"
+$AppVersion = "1.5.0"
 
 # Set this to "yourname/your-repo" to enable a GitHub-releases self-update
 # check on startup. Left blank = feature silently skipped, no network call.
@@ -53,10 +53,12 @@ try {
     $WorkDir    = Join-Path $env:TEMP "PGC_SMP_Install"
     $SettingsDir = Join-Path $env:APPDATA "PGC_SMP_Installer"
     $SettingsFile = Join-Path $SettingsDir "settings.json"
+    # Fallback defaults - only used if a loaded .mrpack doesn't declare its
+    # own "dependencies" block (older/malformed packs). Any pack picked via
+    # "Select .mrpack..." normally overrides these with its own versions -
+    # see Get-PackVersionInfo below.
     $McVersion  = "1.20.1"
     $ForgeVersion = "47.4.20"
-    $ForgeFullVersion = "$McVersion-$ForgeVersion"
-    $ForgeVersionId = "$McVersion-forge-$ForgeVersion"
 } catch {
     [System.Windows.Forms.MessageBox]::Show("Startup error: $($_.Exception.Message)", "PGC SMP Installer", "OK", "Error") | Out-Null
     exit 1
@@ -260,11 +262,65 @@ function Load-PackInfo($mrpackPath) {
     return $result
 }
 
+# ---------------------------------------------------------------------------
+# Reads the actual MC + mod-loader version straight out of the .mrpack's own
+# "dependencies" block instead of relying on the hardcoded top-of-script
+# constants. This is what makes "Select .mrpack..." actually safe to use
+# with a different/updated pack - before this, the installer always tried
+# to install Forge 47.4.20 for MC 1.20.1 no matter what pack was loaded.
+# Falls back to the script defaults only if a pack is missing/malformed
+# dependency info (keeps old packs working).
+# ---------------------------------------------------------------------------
+function Get-PackVersionInfo($index) {
+    $info = [PSCustomObject]@{
+        McVersion   = $McVersion
+        LoaderType  = "forge"
+        LoaderVersion = $ForgeVersion
+        Supported   = $true
+    }
+    if (-not $index -or -not $index.dependencies) { return $info }
+    $deps = $index.dependencies
+
+    if ($deps.PSObject.Properties.Name -contains "minecraft" -and $deps.minecraft) {
+        $info.McVersion = $deps.minecraft
+    }
+
+    if ($deps.PSObject.Properties.Name -contains "forge" -and $deps.forge) {
+        $info.LoaderType = "forge"
+        $info.LoaderVersion = $deps.forge
+        $info.Supported = $true
+    } elseif ($deps.PSObject.Properties.Name -contains "neoforge" -and $deps.neoforge) {
+        $info.LoaderType = "neoforge"
+        $info.LoaderVersion = $deps.neoforge
+        $info.Supported = $true
+    } elseif ($deps.PSObject.Properties.Name -contains "fabric-loader" -and $deps."fabric-loader") {
+        $info.LoaderType = "fabric"
+        $info.LoaderVersion = $deps."fabric-loader"
+        $info.Supported = $false
+    } elseif ($deps.PSObject.Properties.Name -contains "quilt-loader" -and $deps."quilt-loader") {
+        $info.LoaderType = "quilt"
+        $info.LoaderVersion = $deps."quilt-loader"
+        $info.Supported = $false
+    }
+    return $info
+}
+
+function Format-LoaderLabel($loaderType) {
+    switch ($loaderType) {
+        "forge"    { return "Forge" }
+        "neoforge" { return "NeoForge" }
+        "fabric"   { return "Fabric" }
+        "quilt"    { return "Quilt" }
+        default    { return $loaderType }
+    }
+}
+
 $script:MrpackFile = $MrpackFile
 $PackInfo = Load-PackInfo $script:MrpackFile
 $PackIndex = $PackInfo.Index
 $PackSummary = $PackInfo.Summary
 $ModDisplayNames = $PackInfo.DisplayNames
+$script:PackVersionInfo = Get-PackVersionInfo $PackIndex
 
 # ---------------------------------------------------------------------------
 # Optional self-update check (GitHub Releases API) - silent if not configured
@@ -290,7 +346,7 @@ $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "PGC SMP  -  Minecraft $McVersion  |  Forge $ForgeVersion"
+$title.Text = "PGC SMP  -  Minecraft $($script:PackVersionInfo.McVersion)  |  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) $($script:PackVersionInfo.LoaderVersion)"
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 $title.Location = New-Object System.Drawing.Point(15, 12)
 $title.Size = New-Object System.Drawing.Size(470, 30)
@@ -475,12 +531,18 @@ function Refresh-PackInfo {
     $script:PackIndex = $info.Index
     $script:PackSummary = $info.Summary
     $script:ModDisplayNames = $info.DisplayNames
+    $script:PackVersionInfo = Get-PackVersionInfo $script:PackIndex
 
     $txtMrpack.Text = $script:MrpackFile
+    $title.Text = "PGC SMP  -  Minecraft $($script:PackVersionInfo.McVersion)  |  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) $($script:PackVersionInfo.LoaderVersion)"
 
     if ($script:PackSummary) {
         $lblSummary.Text = "$($script:PackSummary.ModCount) mods  -  approx $($script:PackSummary.TotalMB) MB to download"
         $lblSummary.ForeColor = [System.Drawing.Color]::DimGray
+        if (-not $script:PackVersionInfo.Supported) {
+            $lblSummary.Text += "  -  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) auto-install isn't supported yet; mods/configs still install, loader must be added manually."
+            $lblSummary.ForeColor = [System.Drawing.Color]::DarkOrange
+        }
     } elseif ($script:MrpackFile -and (Test-Path $script:MrpackFile)) {
         $lblSummary.Text = "Could not read a valid modpack from the selected .mrpack file."
         $lblSummary.ForeColor = [System.Drawing.Color]::Firebrick
@@ -644,10 +706,16 @@ $sync = [hashtable]::Synchronized(@{
     OkCount  = 0
     FailCount = 0
     SkipCount = 0
+    CompletedCount = 0
 })
 
 $installScript = {
-    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft, $RamGB, $ModNamesMap)
+    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $LoaderType, $LoaderVersion, $DotMinecraft, $RamGB, $ModNamesMap, $MaxConcurrentDownloads)
+
+    # Forge/NeoForge use a "<mc>-<loader>" combined version string and a
+    # "<mc>-forge-<loader>" / "<mc>-neoforge-<loader>" launcher version id.
+    $ForgeFullVersion = "$McVersion-$LoaderVersion"
+    $ForgeVersionId = "$McVersion-$LoaderType-$LoaderVersion"
 
     function Log($m)      { $sync.Log.Add($m) | Out-Null }
     function SetProgress($p) { $sync.Progress = [int]$p }
@@ -685,6 +753,87 @@ $installScript = {
             $wc.Dispose()
         }
         return $script:dlError
+    }
+
+    # -----------------------------------------------------------------------
+    # Downloads many files concurrently (bounded by $maxConcurrent) using a
+    # RunspacePool - this is the "fast installer" change. The old version
+    # downloaded one mod at a time; on a pack with 80+ mods that means 80+
+    # sequential round-trips even when the connection has plenty of headroom
+    # for several transfers at once. Each worker is a fully self-contained
+    # scriptblock (own WebClient, own retry loop, own sha1 check) since a
+    # RunspacePool worker doesn't inherit functions from this outer scope.
+    # -----------------------------------------------------------------------
+    function Download-FilesParallel($jobs, $maxConcurrent) {
+        if ($jobs.Count -eq 0) { return }
+
+        $downloadWorker = {
+            param($sync, $url, $destPath, $expectedSha1, $displayName, $idx, $total)
+            function Get-Sha1Hash($p) { (Get-FileHash -Path $p -Algorithm SHA1).Hash.ToLower() }
+            function Add-Count($name) {
+                [System.Threading.Monitor]::Enter($sync)
+                try { $sync[$name] = $sync[$name] + 1 } finally { [System.Threading.Monitor]::Exit($sync) }
+            }
+            $attempt = 0
+            $ok = $false
+            $lastErr = $null
+            while ($attempt -lt 3 -and -not $ok -and -not $sync.Cancel) {
+                $attempt++
+                try {
+                    $wc = New-Object System.Net.WebClient
+                    $wc.DownloadFile($url, $destPath)
+                    $wc.Dispose()
+                    if (-not $expectedSha1 -or (Get-Sha1Hash $destPath) -eq $expectedSha1) {
+                        $ok = $true
+                    } else {
+                        $lastErr = "hash mismatch"
+                    }
+                } catch {
+                    $lastErr = $_.Exception.Message
+                }
+            }
+            if ($ok) {
+                [void]$sync.Log.Add("[$idx/$total] downloaded: $displayName")
+                Add-Count "OkCount"
+            } elseif (-not $sync.Cancel) {
+                [void]$sync.Log.Add("[X] Giving up on $displayName after 3 attempts - $lastErr")
+                Add-Count "FailCount"
+            }
+            Add-Count "CompletedCount"
+        }
+
+        $pool = [runspacefactory]::CreateRunspacePool(1, [Math]::Max(1, $maxConcurrent))
+        $pool.Open()
+        $handles = New-Object System.Collections.Generic.List[object]
+        try {
+            foreach ($j in $jobs) {
+                if ($sync.Cancel) { break }
+                $p = [powershell]::Create()
+                $p.RunspacePool = $pool
+                [void]$p.AddScript($downloadWorker).AddArgument($sync).AddArgument($j.Url).AddArgument($j.DestPath).AddArgument($j.ExpectedSha1).AddArgument($j.DisplayName).AddArgument($j.Index).AddArgument($j.Total)
+                $handles.Add(@{ PS = $p; AR = $p.BeginInvoke() })
+            }
+
+            while ($true) {
+                $pending = @($handles | Where-Object { -not $_.AR.IsCompleted })
+                $doneCount = [int]$sync.CompletedCount
+                SetProgress (15 + [math]::Floor((70.0 * $doneCount / [math]::Max($jobs.Count, 1))))
+                SetStatus "Downloading mods - $doneCount/$($jobs.Count) done ($maxConcurrent at a time)..."
+                if ($pending.Count -eq 0) { break }
+                if ($sync.Cancel) {
+                    foreach ($h in $pending) { try { $h.PS.Stop() } catch { } }
+                    break
+                }
+                Start-Sleep -Milliseconds 200
+            }
+        } finally {
+            foreach ($h in $handles) {
+                try { $h.PS.EndInvoke($h.AR) | Out-Null } catch { }
+                try { $h.PS.Dispose() } catch { }
+            }
+            $pool.Close()
+            $pool.Dispose()
+        }
     }
 
     # -----------------------------------------------------------------------
@@ -915,25 +1064,35 @@ $installScript = {
                 }
             }
 
-            SetStatus "Checking Forge installation..."
-            $versionFolder = Join-Path $DotMinecraft "versions\$ForgeVersionId"
-            if (Test-Path $versionFolder) {
-                Log "[OK] Forge $ForgeVersion already installed."
-            } else {
-                SetStatus "Downloading Forge installer..."
-                $forgeUrl = "https://maven.minecraftforge.net/net/minecraftforge/forge/$ForgeFullVersion/forge-$ForgeFullVersion-installer.jar"
-                $forgeJar = Join-Path $WorkDir "forge-installer.jar"
-                $err = Download-WithProgress $forgeUrl $forgeJar "Forge installer"
-                if ($err) { Log "[X] Forge installer download failed: $err" }
-                else { Log "[OK] Forge installer downloaded." }
-
-                SetStatus "Installing Forge (this can take a minute)..."
-                $proc = Start-Process -FilePath $javaExePath -ArgumentList @("-jar", "`"$forgeJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
-                if ($proc.ExitCode -ne 0 -or -not (Test-Path $versionFolder)) {
-                    Log "[X] Forge install may have failed (exit code $($proc.ExitCode)). Run forge-installer.jar manually from $WorkDir and choose 'Install Client'."
+            if ($LoaderType -eq "forge" -or $LoaderType -eq "neoforge") {
+                $loaderLabel = if ($LoaderType -eq "neoforge") { "NeoForge" } else { "Forge" }
+                SetStatus "Checking $loaderLabel installation..."
+                $versionFolder = Join-Path $DotMinecraft "versions\$ForgeVersionId"
+                if (Test-Path $versionFolder) {
+                    Log "[OK] $loaderLabel $LoaderVersion already installed."
                 } else {
-                    Log "[OK] Forge $ForgeVersion installed."
+                    SetStatus "Downloading $loaderLabel installer..."
+                    if ($LoaderType -eq "neoforge") {
+                        $loaderUrl = "https://maven.neoforged.net/releases/net/neoforged/neoforge/$LoaderVersion/neoforge-$LoaderVersion-installer.jar"
+                    } else {
+                        $loaderUrl = "https://maven.minecraftforge.net/net/minecraftforge/forge/$ForgeFullVersion/forge-$ForgeFullVersion-installer.jar"
+                    }
+                    $loaderJar = Join-Path $WorkDir "loader-installer.jar"
+                    $err = Download-WithProgress $loaderUrl $loaderJar "$loaderLabel installer"
+                    if ($err) { Log "[X] $loaderLabel installer download failed: $err" }
+                    else { Log "[OK] $loaderLabel installer downloaded." }
+
+                    SetStatus "Installing $loaderLabel (this can take a minute)..."
+                    $proc = Start-Process -FilePath $javaExePath -ArgumentList @("-jar", "`"$loaderJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
+                    if ($proc.ExitCode -ne 0 -or -not (Test-Path $versionFolder)) {
+                        Log "[X] $loaderLabel install may have failed (exit code $($proc.ExitCode)). Run loader-installer.jar manually from $WorkDir and choose 'Install Client'."
+                    } else {
+                        Log "[OK] $loaderLabel $LoaderVersion installed."
+                    }
                 }
+            } else {
+                $loaderLabel = if ($LoaderType -eq "quilt") { "Quilt" } elseif ($LoaderType -eq "fabric") { "Fabric" } else { $LoaderType }
+                Log "[!] $loaderLabel modpacks aren't auto-installed by this installer yet. Mods, configs and overrides will still be placed in the install folder, but you'll need to install $loaderLabel loader $LoaderVersion for Minecraft $McVersion yourself (official $loaderLabel installer) before the launcher profile below can run."
             }
         }
         SetProgress 10
@@ -947,6 +1106,7 @@ $installScript = {
         SetProgress 15
 
         $total = $index.files.Count
+        $jobs = New-Object System.Collections.Generic.List[object]
         $i = 0
         foreach ($file in $index.files) {
             if ($sync.Cancel) { Log "[!] Cancelled by user."; break }
@@ -965,31 +1125,19 @@ $installScript = {
             }
 
             if ($needsDownload) {
-                $attempt = 0
-                $ok = $false
-                while ($attempt -lt 3 -and -not $ok -and -not $sync.Cancel) {
-                    $attempt++
-                    $err = Download-WithProgress $file.downloads[0] $destPath $displayName
-                    if (-not $err -and (Test-Path $destPath)) {
-                        $actualSha1 = (Get-FileHash -Path $destPath -Algorithm SHA1).Hash.ToLower()
-                        if (-not $expectedSha1 -or $actualSha1 -eq $expectedSha1) {
-                            $ok = $true
-                            $sync.OkCount++
-                            Log "[$i/$total] downloaded: $displayName"
-                        } else {
-                            Log "[$i/$total] hash mismatch (attempt $attempt): $displayName"
-                        }
-                    } else {
-                        Log "[$i/$total] retry $attempt failed: $displayName - $err"
-                    }
-                }
-                if (-not $ok -and -not $sync.Cancel) { Log "[X] Giving up on $displayName after 3 attempts."; $sync.FailCount++ }
+                $jobs.Add(@{ Url = $file.downloads[0]; DestPath = $destPath; ExpectedSha1 = $expectedSha1; DisplayName = $displayName; Index = $i; Total = $total })
             } else {
                 $sync.SkipCount++
                 Log "[$i/$total] already up to date: $displayName"
             }
-            SetProgress (15 + [math]::Floor((70.0 * $i / [math]::Max($total,1))))
         }
+
+        if (-not $sync.Cancel -and $jobs.Count -gt 0) {
+            Log "[OK] $($jobs.Count) file(s) to download - up to $MaxConcurrentDownloads at once."
+            $sync.CompletedCount = 0
+            Download-FilesParallel $jobs $MaxConcurrentDownloads
+        }
+        SetProgress 85
 
         if ($sync.Cancel) { $sync.Done = $true; return }
 
@@ -1001,7 +1149,7 @@ $installScript = {
         }
         SetProgress 90
 
-        if ($UseOfficial) {
+        if ($UseOfficial -and ($LoaderType -eq "forge" -or $LoaderType -eq "neoforge")) {
             SetStatus "Registering launcher profile..."
             $profilesFile = Join-Path $DotMinecraft "launcher_profiles.json"
             $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
@@ -1035,6 +1183,9 @@ $installScript = {
             $profilesJson.profiles | Add-Member -MemberType NoteProperty -Name "PGC_SMP" -Value $newProfile -Force
             $profilesJson | ConvertTo-Json -Depth 10 | Set-Content -Path $profilesFile -Encoding UTF8
             Log "[OK] 'PGC SMP' profile registered in the Official Launcher ($RamGB GB RAM)."
+        } elseif ($UseOfficial) {
+            Log "[OK] Files placed in: $InstallDir"
+            Log "     No launcher profile was registered - install $LoaderType loader $LoaderVersion for Minecraft $McVersion first (see warning above), then add a custom profile pointing at this folder."
         } else {
             Log "[OK] Files placed in: $InstallDir"
             Log "     If your launcher needs manual import, point it at this folder."
@@ -1079,13 +1230,15 @@ $btnInstall.Add_Click({
     $sync.Done = $false
     $sync.Failed = $false
     $sync.Cancel = $false
-    $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0
+    $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0; $sync.CompletedCount = 0
 
     $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
     $useOfficial = $selectedName -like "Official Minecraft Launcher*"
     $dotMinecraft = $script:DetectedPaths[$selectedName]
     $installDir = $txtPath.Text
     $ramGB = [int]$numRam.Value
+    $verInfo = $script:PackVersionInfo
+    $maxConcurrentDownloads = 6
 
     $Settings.LastInstallPath = $installDir
     $Settings.RamGB = $ramGB
@@ -1095,7 +1248,7 @@ $btnInstall.Add_Click({
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($script:MrpackFile).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames) | Out-Null
+    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($script:MrpackFile).AddArgument($WorkDir).AddArgument($verInfo.McVersion).AddArgument($verInfo.LoaderType).AddArgument($verInfo.LoaderVersion).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames).AddArgument($maxConcurrentDownloads) | Out-Null
     $asyncResult = $ps.BeginInvoke()
 
     $timer = New-Object System.Windows.Forms.Timer
