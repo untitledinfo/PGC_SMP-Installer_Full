@@ -67,3 +67,14 @@ TROUBLESHOOTING
 - A mod keeps failing after 3 retries: check your connection and click
   Install again - it only re-downloads what's missing or mismatched.
 - Still stuck: use Save Log and share it in the PGC Discord.
+
+------------------------------------------------------------
+v1.4.0 update: "Select .mrpack..." button
+------------------------------------------------------------
+The installer no longer requires PGC_SMP_1_0_0.mrpack to sit
+next to it. A new "Select .mrpack..." button (top of the
+window) lets you browse to any .mrpack file on disk. Pick one
+and the mod list / size summary refresh automatically. If the
+bundled .mrpack is present, it's still auto-loaded on startup
+as before - the button is only needed to point at a different
+pack or file location.

@@ -1,5 +1,5 @@
 <#
-    PGC SMP - One-Click Modpack Installer (GUI)  v1.3.0
+    PGC SMP - One-Click Modpack Installer (GUI)  v1.4.0
     ------------------------------------------------------
     Pack   : PGC SMP v1.0.0
     Game   : Minecraft 1.20.1
@@ -18,7 +18,7 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $ErrorActionPreference = "Stop"
-$AppVersion = "1.3.0"
+$AppVersion = "1.4.0"
 
 # Set this to "yourname/your-repo" to enable a GitHub-releases self-update
 # check on startup. Left blank = feature silently skipped, no network call.
@@ -186,29 +186,40 @@ function Get-DetectedPaths {
 # ---------------------------------------------------------------------------
 # Real, single-source pack summary (real file list, real sizes, real names)
 # ---------------------------------------------------------------------------
-$PackIndex = $null
-$PackSummary = $null
-$ModDisplayNames = @{}
-if (Test-Path $MrpackFile) {
+# ---------------------------------------------------------------------------
+# Loads a .mrpack's index + friendly mod names into a single result object.
+# Pulled out into its own function (rather than one-shot top-level code) so
+# the "Select .mrpack..." button can re-run exactly the same logic against
+# whatever file the user picks, without duplicating it.
+# ---------------------------------------------------------------------------
+function Load-PackInfo($mrpackPath) {
+    $result = [PSCustomObject]@{
+        Index        = $null
+        Summary      = $null
+        DisplayNames = @{}
+    }
+    if (-not $mrpackPath -or -not (Test-Path $mrpackPath)) { return $result }
+
+    $projNames = @{}
     try {
-        $PackIndex = Get-IndexFromMrpack $MrpackFile
-        $totalBytes = ($PackIndex.files | Measure-Object -Property fileSize -Sum).Sum
-        $PackSummary = [PSCustomObject]@{
-            ModCount = $PackIndex.files.Count
+        $result.Index = Get-IndexFromMrpack $mrpackPath
+        $totalBytes = ($result.Index.files | Measure-Object -Property fileSize -Sum).Sum
+        $result.Summary = [PSCustomObject]@{
+            ModCount = $result.Index.files.Count
             TotalMB  = [math]::Round($totalBytes / 1MB, 1)
         }
-        $projNames = Get-ModrinthNames $PackIndex
+        $projNames = Get-ModrinthNames $result.Index
     } catch {
-        # Reading the index/summary itself failed (corrupt zip, unreadable
-        # modrinth.index.json, etc). Reset everything together so the rest of
-        # the script sees a clean "no pack loaded" state instead of a
-        # half-populated one - this is what previously let $PackIndex stay
-        # set while $ModDisplayNames was left incomplete, which is what
+        # Reading the index/summary itself failed (corrupt zip, wrong file
+        # type, unreadable modrinth.index.json, etc). Reset everything
+        # together so the caller sees a clean "no pack loaded" state instead
+        # of a half-populated one - this is what previously let $PackIndex
+        # stay set while $ModDisplayNames was left incomplete, which is what
         # caused the "Add": "Value cannot be null. Parameter name: item"
         # crash further down when the mod list tried to render.
-        $PackIndex = $null
-        $PackSummary = $null
-        $projNames = @{}
+        $result.Index = $null
+        $result.Summary = $null
+        return $result
     }
 
     # BUGFIX: this used to live inside the try/catch above as one unit, so a
@@ -218,37 +229,42 @@ if (Test-Path $MrpackFile) {
     # a $null reach $listMods.Items.Add() later. Each file is now resolved
     # independently: whatever happens, every file that exists in $PackIndex
     # gets *some* non-null display name.
-    if ($PackIndex) {
-        foreach ($f in $PackIndex.files) {
-            $friendly = $null
-            try {
-                if ($f.downloads -and $f.downloads.Count -gt 0 -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
-                    # NOTE: this used to be named $pid, which is a *read-only* PowerShell
-                    # automatic variable (the current process ID). Assigning to it throws
-                    # "Cannot overwrite variable PID because it is read-only or constant"
-                    # on literally the first Modrinth-hosted file in the pack — which is why
-                    # this crashed every single run, not just sometimes.
-                    $projectId = $matches[1]
-                    if ($projNames -and $projNames.ContainsKey($projectId)) { $friendly = $projNames[$projectId] }
-                }
-            } catch {
-                # name-lookup failed for this one file only - fall through to the
-                # filename-based fallback below, don't let it affect other files
+    foreach ($f in $result.Index.files) {
+        $friendly = $null
+        try {
+            if ($f.downloads -and $f.downloads.Count -gt 0 -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
+                # NOTE: this used to be named $pid, which is a *read-only* PowerShell
+                # automatic variable (the current process ID). Assigning to it throws
+                # "Cannot overwrite variable PID because it is read-only or constant"
+                # on literally the first Modrinth-hosted file in the pack — which is why
+                # this crashed every single run, not just sometimes.
+                $projectId = $matches[1]
+                if ($projNames -and $projNames.ContainsKey($projectId)) { $friendly = $projNames[$projectId] }
             }
+        } catch {
+            # name-lookup failed for this one file only - fall through to the
+            # filename-based fallback below, don't let it affect other files
+        }
 
-            if ([string]::IsNullOrWhiteSpace($friendly)) {
-                if (-not [string]::IsNullOrWhiteSpace($f.path)) {
-                    try { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) } catch { $friendly = $f.path }
-                }
-            }
-            if ([string]::IsNullOrWhiteSpace($friendly)) { $friendly = "(unnamed file)" }
-
+        if ([string]::IsNullOrWhiteSpace($friendly)) {
             if (-not [string]::IsNullOrWhiteSpace($f.path)) {
-                $ModDisplayNames[$f.path] = $friendly
+                try { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) } catch { $friendly = $f.path }
             }
         }
+        if ([string]::IsNullOrWhiteSpace($friendly)) { $friendly = "(unnamed file)" }
+
+        if (-not [string]::IsNullOrWhiteSpace($f.path)) {
+            $result.DisplayNames[$f.path] = $friendly
+        }
     }
+    return $result
 }
+
+$script:MrpackFile = $MrpackFile
+$PackInfo = Load-PackInfo $script:MrpackFile
+$PackIndex = $PackInfo.Index
+$PackSummary = $PackInfo.Summary
+$ModDisplayNames = $PackInfo.DisplayNames
 
 # ---------------------------------------------------------------------------
 # Optional self-update check (GitHub Releases API) - silent if not configured
@@ -268,7 +284,7 @@ if ($GithubRepo) {
 # ---------------------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "PGC SMP Installer v$AppVersion"
-$form.Size = New-Object System.Drawing.Size(620, 700)
+$form.Size = New-Object System.Drawing.Size(620, 754)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -299,58 +315,77 @@ $lblSummary.Location = New-Object System.Drawing.Point(15, 42)
 $lblSummary.Size = New-Object System.Drawing.Size(580, 20)
 $form.Controls.Add($lblSummary)
 
+$lblMrpack = New-Object System.Windows.Forms.Label
+$lblMrpack.Text = "Modpack (.mrpack) file:"
+$lblMrpack.Location = New-Object System.Drawing.Point(15, 64)
+$lblMrpack.Size = New-Object System.Drawing.Size(300, 18)
+$form.Controls.Add($lblMrpack)
+
+$txtMrpack = New-Object System.Windows.Forms.TextBox
+$txtMrpack.Location = New-Object System.Drawing.Point(15, 84)
+$txtMrpack.Size = New-Object System.Drawing.Size(480, 24)
+$txtMrpack.ReadOnly = $true
+$txtMrpack.Text = $script:MrpackFile
+$form.Controls.Add($txtMrpack)
+
+$btnSelectMrpack = New-Object System.Windows.Forms.Button
+$btnSelectMrpack.Text = "Select .mrpack..."
+$btnSelectMrpack.Location = New-Object System.Drawing.Point(505, 83)
+$btnSelectMrpack.Size = New-Object System.Drawing.Size(85, 26)
+$form.Controls.Add($btnSelectMrpack)
+
 if ($UpdateAvailable) {
     $lblUpdate = New-Object System.Windows.Forms.Label
     $lblUpdate.Text = "A newer installer version ($UpdateAvailable) is available."
     $lblUpdate.ForeColor = [System.Drawing.Color]::DarkOrange
-    $lblUpdate.Location = New-Object System.Drawing.Point(15, 62)
+    $lblUpdate.Location = New-Object System.Drawing.Point(15, 116)
     $lblUpdate.Size = New-Object System.Drawing.Size(580, 18)
     $form.Controls.Add($lblUpdate)
 }
 
 $lblLauncher = New-Object System.Windows.Forms.Label
 $lblLauncher.Text = T "Launcher"
-$lblLauncher.Location = New-Object System.Drawing.Point(15, 85)
+$lblLauncher.Location = New-Object System.Drawing.Point(15, 139)
 $lblLauncher.Size = New-Object System.Drawing.Size(300, 20)
 $form.Controls.Add($lblLauncher)
 
 $comboLaunchers = New-Object System.Windows.Forms.ComboBox
-$comboLaunchers.Location = New-Object System.Drawing.Point(15, 107)
+$comboLaunchers.Location = New-Object System.Drawing.Point(15, 161)
 $comboLaunchers.Size = New-Object System.Drawing.Size(480, 24)
 $comboLaunchers.DropDownStyle = "DropDownList"
 $form.Controls.Add($comboLaunchers)
 
 $btnRescan = New-Object System.Windows.Forms.Button
 $btnRescan.Text = "Rescan"
-$btnRescan.Location = New-Object System.Drawing.Point(505, 106)
+$btnRescan.Location = New-Object System.Drawing.Point(505, 160)
 $btnRescan.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnRescan)
 
 $lblPath = New-Object System.Windows.Forms.Label
 $lblPath.Text = T "Install"
-$lblPath.Location = New-Object System.Drawing.Point(15, 141)
+$lblPath.Location = New-Object System.Drawing.Point(15, 195)
 $lblPath.Size = New-Object System.Drawing.Size(90, 20)
 $form.Controls.Add($lblPath)
 
 $txtPath = New-Object System.Windows.Forms.TextBox
-$txtPath.Location = New-Object System.Drawing.Point(105, 139)
+$txtPath.Location = New-Object System.Drawing.Point(105, 193)
 $txtPath.Size = New-Object System.Drawing.Size(390, 24)
 $form.Controls.Add($txtPath)
 
 $btnBrowse = New-Object System.Windows.Forms.Button
 $btnBrowse.Text = "Browse..."
-$btnBrowse.Location = New-Object System.Drawing.Point(505, 138)
+$btnBrowse.Location = New-Object System.Drawing.Point(505, 192)
 $btnBrowse.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnBrowse)
 
 $lblRam = New-Object System.Windows.Forms.Label
 $lblRam.Text = T "Ram"
-$lblRam.Location = New-Object System.Drawing.Point(15, 173)
+$lblRam.Location = New-Object System.Drawing.Point(15, 227)
 $lblRam.Size = New-Object System.Drawing.Size(140, 20)
 $form.Controls.Add($lblRam)
 
 $numRam = New-Object System.Windows.Forms.NumericUpDown
-$numRam.Location = New-Object System.Drawing.Point(160, 171)
+$numRam.Location = New-Object System.Drawing.Point(160, 225)
 $numRam.Size = New-Object System.Drawing.Size(60, 24)
 $numRam.Minimum = 2
 $numRam.Maximum = 16
@@ -359,12 +394,12 @@ $form.Controls.Add($numRam)
 
 $lblMods = New-Object System.Windows.Forms.Label
 $lblMods.Text = T "Mods"
-$lblMods.Location = New-Object System.Drawing.Point(15, 205)
+$lblMods.Location = New-Object System.Drawing.Point(15, 259)
 $lblMods.Size = New-Object System.Drawing.Size(200, 20)
 $form.Controls.Add($lblMods)
 
 $listMods = New-Object System.Windows.Forms.ListBox
-$listMods.Location = New-Object System.Drawing.Point(15, 227)
+$listMods.Location = New-Object System.Drawing.Point(15, 281)
 $listMods.Size = New-Object System.Drawing.Size(575, 90)
 if ($PackIndex) {
     foreach ($f in ($PackIndex.files | Sort-Object { $ModDisplayNames[$_.path] })) {
@@ -374,7 +409,7 @@ if ($PackIndex) {
 $form.Controls.Add($listMods)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(15, 328)
+$progressBar.Location = New-Object System.Drawing.Point(15, 382)
 $progressBar.Size = New-Object System.Drawing.Size(575, 24)
 $progressBar.Minimum = 0
 $progressBar.Maximum = 100
@@ -382,7 +417,7 @@ $form.Controls.Add($progressBar)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = T "Ready"
-$lblStatus.Location = New-Object System.Drawing.Point(15, 356)
+$lblStatus.Location = New-Object System.Drawing.Point(15, 410)
 $lblStatus.Size = New-Object System.Drawing.Size(575, 20)
 $form.Controls.Add($lblStatus)
 
@@ -392,47 +427,98 @@ $txtLog.ReadOnly = $true
 $txtLog.BackColor = [System.Drawing.Color]::Black
 $txtLog.ForeColor = [System.Drawing.Color]::Gainsboro
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$txtLog.Location = New-Object System.Drawing.Point(15, 382)
+$txtLog.Location = New-Object System.Drawing.Point(15, 436)
 $txtLog.Size = New-Object System.Drawing.Size(575, 200)
 $form.Controls.Add($txtLog)
 
 $btnInstall = New-Object System.Windows.Forms.Button
 $btnInstall.Text = T "InstallBtn"
-$btnInstall.Location = New-Object System.Drawing.Point(15, 592)
+$btnInstall.Location = New-Object System.Drawing.Point(15, 646)
 $btnInstall.Size = New-Object System.Drawing.Size(120, 34)
 $btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($btnInstall)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = T "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(145, 592)
+$btnCancel.Location = New-Object System.Drawing.Point(145, 646)
 $btnCancel.Size = New-Object System.Drawing.Size(100, 34)
 $btnCancel.Enabled = $false
 $form.Controls.Add($btnCancel)
 
 $btnOpenFolder = New-Object System.Windows.Forms.Button
 $btnOpenFolder.Text = T "OpenFolder"
-$btnOpenFolder.Location = New-Object System.Drawing.Point(255, 592)
+$btnOpenFolder.Location = New-Object System.Drawing.Point(255, 646)
 $btnOpenFolder.Size = New-Object System.Drawing.Size(110, 34)
 $btnOpenFolder.Enabled = $false
 $form.Controls.Add($btnOpenFolder)
 
 $btnSaveLog = New-Object System.Windows.Forms.Button
 $btnSaveLog.Text = T "SaveLog"
-$btnSaveLog.Location = New-Object System.Drawing.Point(375, 592)
+$btnSaveLog.Location = New-Object System.Drawing.Point(375, 646)
 $btnSaveLog.Size = New-Object System.Drawing.Size(90, 34)
 $form.Controls.Add($btnSaveLog)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
 $btnUninstall.Text = T "Uninstall"
-$btnUninstall.Location = New-Object System.Drawing.Point(475, 592)
+$btnUninstall.Location = New-Object System.Drawing.Point(475, 646)
 $btnUninstall.Size = New-Object System.Drawing.Size(115, 34)
 $form.Controls.Add($btnUninstall)
 
-if (-not (Test-Path $MrpackFile)) {
+# ---------------------------------------------------------------------------
+# Re-runs Load-PackInfo against whatever $script:MrpackFile currently points
+# at, and refreshes every control that shows pack info (summary line, mod
+# list). Called once at startup implicitly (the vars are already populated
+# above) and again every time "Select .mrpack..." picks a new file.
+# ---------------------------------------------------------------------------
+function Refresh-PackInfo {
+    $info = Load-PackInfo $script:MrpackFile
+    $script:PackIndex = $info.Index
+    $script:PackSummary = $info.Summary
+    $script:ModDisplayNames = $info.DisplayNames
+
+    $txtMrpack.Text = $script:MrpackFile
+
+    if ($script:PackSummary) {
+        $lblSummary.Text = "$($script:PackSummary.ModCount) mods  -  approx $($script:PackSummary.TotalMB) MB to download"
+        $lblSummary.ForeColor = [System.Drawing.Color]::DimGray
+    } elseif ($script:MrpackFile -and (Test-Path $script:MrpackFile)) {
+        $lblSummary.Text = "Could not read a valid modpack from the selected .mrpack file."
+        $lblSummary.ForeColor = [System.Drawing.Color]::Firebrick
+    } else {
+        $lblSummary.Text = "No .mrpack selected yet - click 'Select .mrpack...' to choose one."
+        $lblSummary.ForeColor = [System.Drawing.Color]::Firebrick
+    }
+
+    $listMods.Items.Clear()
+    if ($script:PackIndex) {
+        foreach ($f in ($script:PackIndex.files | Sort-Object { $script:ModDisplayNames[$_.path] })) {
+            Add-SafeListItem $listMods $script:ModDisplayNames[$f.path]
+        }
+    }
+}
+
+$btnSelectMrpack.Add_Click({
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "Modrinth Modpack (*.mrpack)|*.mrpack|All files (*.*)|*.*"
+    $ofd.Title = "Select a .mrpack modpack file"
+    try {
+        if ($script:MrpackFile -and (Test-Path $script:MrpackFile)) {
+            $ofd.InitialDirectory = Split-Path -Parent $script:MrpackFile
+        } else {
+            $ofd.InitialDirectory = $ScriptDir
+        }
+    } catch { }
+
+    if ($ofd.ShowDialog() -eq "OK") {
+        $script:MrpackFile = $ofd.FileName
+        Refresh-PackInfo
+    }
+})
+
+if (-not (Test-Path $script:MrpackFile)) {
     [System.Windows.Forms.MessageBox]::Show(
-        "Could not find PGC_SMP_1_0_0.mrpack next to this program.`nKeep the installer and the .mrpack file in the same folder.",
-        "PGC SMP Installer", "OK", "Error") | Out-Null
+        "Could not find PGC_SMP_1_0_0.mrpack next to this program.`nUse the 'Select .mrpack...' button to point the installer at a modpack file.",
+        "PGC SMP Installer", "OK", "Warning") | Out-Null
 }
 
 function Populate-Launchers {
@@ -967,12 +1053,26 @@ $installScript = {
 }
 
 $btnInstall.Add_Click({
+    if (-not $script:MrpackFile -or -not (Test-Path $script:MrpackFile)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No valid .mrpack file selected.`nClick 'Select .mrpack...' and choose a modpack file first.",
+            "PGC SMP Installer", "OK", "Error") | Out-Null
+        return
+    }
+    if (-not $script:PackIndex) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "The selected file could not be read as a valid .mrpack modpack.`nPick a different file with 'Select .mrpack...'.",
+            "PGC SMP Installer", "OK", "Error") | Out-Null
+        return
+    }
+
     $btnInstall.Enabled = $false
     $btnCancel.Enabled = $true
     $comboLaunchers.Enabled = $false
     $btnBrowse.Enabled = $false
     $btnRescan.Enabled = $false
     $btnUninstall.Enabled = $false
+    $btnSelectMrpack.Enabled = $false
     $txtLog.Clear()
     $sync.Log.Clear()
     $sync.Progress = 0
@@ -995,7 +1095,7 @@ $btnInstall.Add_Click({
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($MrpackFile).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($ModDisplayNames) | Out-Null
+    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($script:MrpackFile).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames) | Out-Null
     $asyncResult = $ps.BeginInvoke()
 
     $timer = New-Object System.Windows.Forms.Timer
@@ -1020,6 +1120,7 @@ $btnInstall.Add_Click({
             $btnBrowse.Enabled = $true
             $btnRescan.Enabled = $true
             $btnUninstall.Enabled = $true
+            $btnSelectMrpack.Enabled = $true
             if (Test-Path $installDir) { $btnOpenFolder.Enabled = $true }
             if ($sync.Cancel) {
                 [System.Windows.Forms.MessageBox]::Show("Installation cancelled.", "PGC SMP Installer", "OK", "Warning") | Out-Null
