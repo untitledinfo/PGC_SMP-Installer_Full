@@ -601,6 +601,179 @@ $installScript = {
         return $script:dlError
     }
 
+    # -----------------------------------------------------------------------
+    # "PC checker" - basic system requirements sanity check. Logs warnings for
+    # soft issues (low RAM vs requested allocation) and returns $false only
+    # for hard blockers (32-bit OS, which can't run 64-bit Java/Minecraft/Forge
+    # at all - nothing this installer does can work around that).
+    # -----------------------------------------------------------------------
+    function Test-SystemRequirements($requestedRamGB) {
+        $ok = $true
+        try {
+            $is64Os = [Environment]::Is64BitOperatingSystem
+            if (-not $is64Os) {
+                Log "[X] 32-bit Windows detected. Modern Minecraft/Forge/Java all require 64-bit Windows - this PC can't run PGC SMP."
+                $ok = $false
+            } else {
+                Log "[OK] 64-bit Windows detected."
+            }
+        } catch { }
+
+        try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $caption = $os.Caption
+            Log "[OK] OS: $caption"
+        } catch { }
+
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            $totalRamGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+            Log "[OK] System RAM: ${totalRamGB} GB"
+            # Leave roughly 2 GB headroom for Windows + the launcher itself.
+            if ($requestedRamGB -gt ($totalRamGB - 2)) {
+                Log "[!] You allocated ${requestedRamGB} GB to Minecraft but this PC only has ${totalRamGB} GB total. Consider lowering the RAM slider - allocating nearly all system RAM can cause crashes or a frozen PC while playing."
+            }
+        } catch { }
+
+        return $ok
+    }
+
+    # -----------------------------------------------------------------------
+    # Scans every place a Java install could realistically be - not just
+    # whatever "java" resolves to on PATH (which is what the old version
+    # checked, and which silently missed installs that hadn't updated PATH,
+    # or JAVA_HOME-only installs). Returns objects with .Path/.Major/.Source
+    # so the caller can pick the best match and use its *full path* directly,
+    # rather than depending on PATH being refreshed mid-process (it isn't -
+    # a child process only sees PATH changes made after it started).
+    # -----------------------------------------------------------------------
+    function Get-InstalledJavaCandidates {
+        $candidates = New-Object System.Collections.Generic.List[object]
+
+        function Add-Candidate($exePath, $source) {
+            if (-not $exePath -or -not (Test-Path $exePath)) { return }
+            try {
+                $out = & $exePath -version 2>&1 | Out-String
+                # Handles both old-style "1.8.0_301" and new-style "17.0.9" version strings.
+                if ($out -match 'version "1\.(\d+)\.') {
+                    $major = [int]$matches[1]
+                } elseif ($out -match 'version "(\d+)') {
+                    $major = [int]$matches[1]
+                } else {
+                    return
+                }
+                $candidates.Add([PSCustomObject]@{ Path = $exePath; Major = $major; Source = $source })
+            } catch { }
+        }
+
+        Add-Candidate "java" "PATH"
+
+        if ($env:JAVA_HOME) {
+            Add-Candidate (Join-Path $env:JAVA_HOME "bin\java.exe") "JAVA_HOME"
+        }
+
+        $regRoots = @(
+            "HKLM:\SOFTWARE\Eclipse Adoptium\JDK",
+            "HKLM:\SOFTWARE\Eclipse Adoptium\JRE",
+            "HKLM:\SOFTWARE\WOW6432Node\Eclipse Adoptium\JDK",
+            "HKLM:\SOFTWARE\JavaSoft\JDK",
+            "HKLM:\SOFTWARE\JavaSoft\Java Runtime Environment",
+            "HKLM:\SOFTWARE\WOW6432Node\JavaSoft\Java Runtime Environment"
+        )
+        foreach ($root in $regRoots) {
+            try {
+                if (Test-Path $root) {
+                    foreach ($verKey in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+                        # NOTE: named $javaHomePath, not $home - $home is a read-only
+                        # PowerShell automatic variable (same bug class as the $pid issue
+                        # fixed elsewhere in this file). It would've silently swallowed
+                        # every registry-based detection attempt instead of crashing,
+                        # since this is inside a try/catch - just as bad, harder to notice.
+                        $javaHomePath = (Get-ItemProperty -Path $verKey.PSPath -ErrorAction SilentlyContinue).JavaHome
+                        if ($javaHomePath) { Add-Candidate (Join-Path $javaHomePath "bin\java.exe") "Registry" }
+                    }
+                }
+            } catch { }
+        }
+
+        foreach ($base in @("C:\Program Files\Eclipse Adoptium", "C:\Program Files\Java", "C:\Program Files\Microsoft")) {
+            try {
+                if (Test-Path $base) {
+                    foreach ($dir in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) {
+                        Add-Candidate (Join-Path $dir.FullName "bin\java.exe") "Common install path"
+                    }
+                }
+            } catch { }
+        }
+
+        return $candidates
+    }
+
+    # -----------------------------------------------------------------------
+    # Auto-installs Java via Adoptium's official API instead of opening a
+    # browser tab and asking the player to do it manually. Uses the real
+    # signed Eclipse Temurin MSI and installs it silently.
+    #
+    # NOTE on elevation: installing Java system-wide requires admin rights.
+    # If this process isn't already elevated, Start-Process -Verb RunAs
+    # triggers Windows' normal UAC "Do you want to allow this app..." prompt.
+    # That prompt is expected and is Windows' own legitimate mechanism for
+    # privilege escalation - there is no way (and no reason to try) to
+    # silently bypass it. Attempting to would be exactly the kind of
+    # behavior antivirus software correctly flags as malicious.
+    # -----------------------------------------------------------------------
+    function Install-JavaSilently($majorVersion) {
+        SetStatus "Looking up latest Java $majorVersion (Adoptium API)..."
+        try {
+            $apiUrl = "https://api.adoptium.net/v3/assets/latest/$majorVersion/hotspot?architecture=x64&image_type=jre&os=windows&vendor=eclipse"
+            $assets = Invoke-RestMethod -Uri $apiUrl -Method Get -TimeoutSec 20
+            $asset = $assets | Select-Object -First 1
+            if (-not $asset -or -not $asset.binary.installer.link) {
+                Log "[X] Adoptium API returned no installer for Java $majorVersion x64 Windows."
+                return $null
+            }
+        } catch {
+            Log "[X] Could not reach Adoptium's API: $($_.Exception.Message)"
+            return $null
+        }
+
+        $msiUrl = $asset.binary.installer.link
+        $msiName = Split-Path -Leaf ([Uri]$msiUrl).LocalPath
+        $msiPath = Join-Path $WorkDir $msiName
+        Log "[OK] Found Java $($asset.version.openjdk_version) - downloading installer..."
+
+        $err = Download-WithProgress $msiUrl $msiPath "Java $majorVersion installer"
+        if ($err) { Log "[X] Java installer download failed: $err"; return $null }
+        Log "[OK] Java installer downloaded."
+
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $msiArgs = "/i `"$msiPath`" /quiet /norestart ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJavaHome"
+
+        SetStatus "Installing Java $majorVersion (a Windows permission prompt may appear - click Yes)..."
+        Log "[..] Installing Java $majorVersion silently via msiexec..."
+        try {
+            if ($isAdmin) {
+                $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -WindowStyle Hidden
+            } else {
+                $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -Verb RunAs
+            }
+        } catch {
+            # Most common cause here: the user clicked "No" on the UAC prompt.
+            Log "[X] Java install did not run: $($_.Exception.Message)"
+            return $null
+        }
+
+        # 0 = success, 3010 = success but a reboot is recommended (fine to continue).
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            Log "[X] Java installer exited with code $($proc.ExitCode)."
+            return $null
+        }
+
+        Log "[OK] Java $majorVersion installed."
+        $fresh = Get-InstalledJavaCandidates | Where-Object { $_.Major -ge $majorVersion } | Select-Object -First 1
+        return $fresh
+    }
+
     try {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $InstallDir "mods") -Force | Out-Null
@@ -626,19 +799,35 @@ $installScript = {
             }
         } catch { }
 
+        SetStatus "Checking system requirements..."
+        if (-not (Test-SystemRequirements $RamGB)) {
+            $sync.Failed = $true; $sync.Done = $true; return
+        }
+
+        $javaExePath = "java"
         if ($UseOfficial) {
-            SetStatus "Checking Java..."
-            $javaOk = $false
-            try {
-                $out = & java -version 2>&1 | Out-String
-                if ($out -match '"(\d+)') { if ([int]$matches[1] -ge 17) { $javaOk = $true } }
-            } catch { }
-            if (-not $javaOk) {
-                Log "[X] Java 17+ not found. Opening the download page - install Java, then run this installer again."
-                Start-Process "https://adoptium.net/temurin/releases/?version=17"
-                $sync.Failed = $true; $sync.Done = $true; return
+            $requiredJavaMajor = 17
+            SetStatus "Checking for Java $requiredJavaMajor+..."
+            $javaCandidates = Get-InstalledJavaCandidates | Where-Object { $_.Major -ge $requiredJavaMajor } | Sort-Object Major -Descending
+            $best = $javaCandidates | Select-Object -First 1
+
+            if ($best) {
+                Log "[OK] Java $($best.Major) found ($($best.Source)): $($best.Path)"
+                $javaExePath = $best.Path
+            } else {
+                Log "[!] No Java $requiredJavaMajor+ install found on this PC. Auto-installing Eclipse Temurin $requiredJavaMajor via Adoptium's official API..."
+                $installed = Install-JavaSilently $requiredJavaMajor
+                if ($installed) {
+                    Log "[OK] Java $($installed.Major) auto-installed and verified: $($installed.Path)"
+                    $javaExePath = $installed.Path
+                } else {
+                    # Last-resort fallback only if the fully-automatic path genuinely
+                    # couldn't complete (offline, UAC declined, no matching build, etc).
+                    Log "[X] Automatic Java install didn't complete. Opening the manual download page instead - install Java $requiredJavaMajor+, then run this installer again."
+                    Start-Process "https://adoptium.net/temurin/releases/?version=$requiredJavaMajor"
+                    $sync.Failed = $true; $sync.Done = $true; return
+                }
             }
-            Log "[OK] Java 17+ found."
 
             SetStatus "Checking Forge installation..."
             $versionFolder = Join-Path $DotMinecraft "versions\$ForgeVersionId"
@@ -653,7 +842,7 @@ $installScript = {
                 else { Log "[OK] Forge installer downloaded." }
 
                 SetStatus "Installing Forge (this can take a minute)..."
-                $proc = Start-Process -FilePath "java" -ArgumentList @("-jar", "`"$forgeJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
+                $proc = Start-Process -FilePath $javaExePath -ArgumentList @("-jar", "`"$forgeJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
                 if ($proc.ExitCode -ne 0 -or -not (Test-Path $versionFolder)) {
                     Log "[X] Forge install may have failed (exit code $($proc.ExitCode)). Run forge-installer.jar manually from $WorkDir and choose 'Install Client'."
                 } else {
