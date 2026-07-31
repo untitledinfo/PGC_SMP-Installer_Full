@@ -1,9 +1,18 @@
 <#
-    PGC SMP - One-Click Modpack Installer (GUI)  v1.5.0
+    PGC SMP - One-Click Modpack Installer (GUI)  v1.4.0
     ------------------------------------------------------
     Pack   : PGC SMP v1.0.0
     Game   : Minecraft 1.20.1
     Loader : Forge 47.4.20
+
+    Scope: this installer ONLY extracts/copies the modpack's files (mods,
+    configs, resourcepacks, overrides) into the target instance folder and
+    registers a launcher profile if using the Official Launcher. It does not
+    check for, download, or install Java or Forge - if you're using the
+    Official Minecraft Launcher, install Forge 47.4.20 for Minecraft 1.20.1
+    yourself first (files.minecraftforge.net). Third-party launchers (Prism,
+    Modrinth App, MultiMC, CurseForge) manage their own Java/loader installs,
+    so this only matters for the Official Launcher path.
 
     Only supports legitimate, owned Minecraft accounts (Official Launcher with
     a Microsoft/paid account, or a third-party launcher's own legitimate auth).
@@ -18,7 +27,7 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $ErrorActionPreference = "Stop"
-$AppVersion = "1.5.0"
+$AppVersion = "1.4.0"
 
 # Set this to "yourname/your-repo" to enable a GitHub-releases self-update
 # check on startup. Left blank = feature silently skipped, no network call.
@@ -53,12 +62,10 @@ try {
     $WorkDir    = Join-Path $env:TEMP "PGC_SMP_Install"
     $SettingsDir = Join-Path $env:APPDATA "PGC_SMP_Installer"
     $SettingsFile = Join-Path $SettingsDir "settings.json"
-    # Fallback defaults - only used if a loaded .mrpack doesn't declare its
-    # own "dependencies" block (older/malformed packs). Any pack picked via
-    # "Select .mrpack..." normally overrides these with its own versions -
-    # see Get-PackVersionInfo below.
     $McVersion  = "1.20.1"
     $ForgeVersion = "47.4.20"
+    $ForgeFullVersion = "$McVersion-$ForgeVersion"
+    $ForgeVersionId = "$McVersion-forge-$ForgeVersion"
 } catch {
     [System.Windows.Forms.MessageBox]::Show("Startup error: $($_.Exception.Message)", "PGC SMP Installer", "OK", "Error") | Out-Null
     exit 1
@@ -90,6 +97,8 @@ $Strings = @{
         Ram        = "RAM allocation (GB):"
         Ready      = "Ready."
         Mods       = "Mods included:"
+        MrpackLabel = "Modpack (.mrpack) file:"
+        MrpackMissing = "No modpack file loaded yet - click Browse to select a .mrpack file."
     }
     UR = @{
         Launcher   = "Launcher / install folder mila:"
@@ -102,6 +111,8 @@ $Strings = @{
         Ram        = "RAM (GB):"
         Ready      = "Tayyar hai."
         Mods       = "Mods shamil:"
+        MrpackLabel = "Modpack (.mrpack) faayl:"
+        MrpackMissing = "Abhi tak koi modpack file load nahi hui - Browse per click karke .mrpack file chunein."
     }
 }
 $Lang = if ($Settings.Language -eq "UR") { "UR" } else { "EN" }
@@ -186,42 +197,36 @@ function Get-DetectedPaths {
 }
 
 # ---------------------------------------------------------------------------
-# Real, single-source pack summary (real file list, real sizes, real names)
+# Real, single-source pack summary (real file list, real sizes, real names).
+# Wrapped in a function (not just run once at startup) so picking a different
+# .mrpack file via the new "Modpack file" browse button can reload it.
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Loads a .mrpack's index + friendly mod names into a single result object.
-# Pulled out into its own function (rather than one-shot top-level code) so
-# the "Select .mrpack..." button can re-run exactly the same logic against
-# whatever file the user picks, without duplicating it.
-# ---------------------------------------------------------------------------
-function Load-PackInfo($mrpackPath) {
-    $result = [PSCustomObject]@{
-        Index        = $null
-        Summary      = $null
-        DisplayNames = @{}
-    }
-    if (-not $mrpackPath -or -not (Test-Path $mrpackPath)) { return $result }
+function Load-Pack($path) {
+    $script:PackIndex = $null
+    $script:PackSummary = $null
+    $script:ModDisplayNames = @{}
 
-    $projNames = @{}
+    if (-not (Test-Path $path)) { return $false }
+
     try {
-        $result.Index = Get-IndexFromMrpack $mrpackPath
-        $totalBytes = ($result.Index.files | Measure-Object -Property fileSize -Sum).Sum
-        $result.Summary = [PSCustomObject]@{
-            ModCount = $result.Index.files.Count
+        $script:PackIndex = Get-IndexFromMrpack $path
+        $totalBytes = ($script:PackIndex.files | Measure-Object -Property fileSize -Sum).Sum
+        $script:PackSummary = [PSCustomObject]@{
+            ModCount = $script:PackIndex.files.Count
             TotalMB  = [math]::Round($totalBytes / 1MB, 1)
         }
-        $projNames = Get-ModrinthNames $result.Index
+        $projNames = Get-ModrinthNames $script:PackIndex
     } catch {
-        # Reading the index/summary itself failed (corrupt zip, wrong file
-        # type, unreadable modrinth.index.json, etc). Reset everything
-        # together so the caller sees a clean "no pack loaded" state instead
-        # of a half-populated one - this is what previously let $PackIndex
-        # stay set while $ModDisplayNames was left incomplete, which is what
-        # caused the "Add": "Value cannot be null. Parameter name: item"
-        # crash further down when the mod list tried to render.
-        $result.Index = $null
-        $result.Summary = $null
-        return $result
+        # Reading the index/summary itself failed (corrupt zip, unreadable
+        # modrinth.index.json, wrong file selected, etc). Reset everything
+        # together so the rest of the script sees a clean "no pack loaded"
+        # state instead of a half-populated one - this is what previously let
+        # $PackIndex stay set while $ModDisplayNames was left incomplete,
+        # which is what caused the "Add": "Value cannot be null. Parameter
+        # name: item" crash further down when the mod list tried to render.
+        $script:PackIndex = $null
+        $script:PackSummary = $null
+        $projNames = @{}
     }
 
     # BUGFIX: this used to live inside the try/catch above as one unit, so a
@@ -231,96 +236,41 @@ function Load-PackInfo($mrpackPath) {
     # a $null reach $listMods.Items.Add() later. Each file is now resolved
     # independently: whatever happens, every file that exists in $PackIndex
     # gets *some* non-null display name.
-    foreach ($f in $result.Index.files) {
-        $friendly = $null
-        try {
-            if ($f.downloads -and $f.downloads.Count -gt 0 -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
-                # NOTE: this used to be named $pid, which is a *read-only* PowerShell
-                # automatic variable (the current process ID). Assigning to it throws
-                # "Cannot overwrite variable PID because it is read-only or constant"
-                # on literally the first Modrinth-hosted file in the pack — which is why
-                # this crashed every single run, not just sometimes.
-                $projectId = $matches[1]
-                if ($projNames -and $projNames.ContainsKey($projectId)) { $friendly = $projNames[$projectId] }
+    if ($script:PackIndex) {
+        foreach ($f in $script:PackIndex.files) {
+            $friendly = $null
+            try {
+                if ($f.downloads -and $f.downloads.Count -gt 0 -and $f.downloads[0] -match "cdn\.modrinth\.com/data/([^/]+)/versions/") {
+                    # NOTE: this used to be named $pid, which is a *read-only* PowerShell
+                    # automatic variable (the current process ID). Assigning to it throws
+                    # "Cannot overwrite variable PID because it is read-only or constant"
+                    # on literally the first Modrinth-hosted file in the pack — which is why
+                    # this crashed every single run, not just sometimes.
+                    $projectId = $matches[1]
+                    if ($projNames -and $projNames.ContainsKey($projectId)) { $friendly = $projNames[$projectId] }
+                }
+            } catch {
+                # name-lookup failed for this one file only - fall through to the
+                # filename-based fallback below, don't let it affect other files
             }
-        } catch {
-            # name-lookup failed for this one file only - fall through to the
-            # filename-based fallback below, don't let it affect other files
-        }
 
-        if ([string]::IsNullOrWhiteSpace($friendly)) {
+            if ([string]::IsNullOrWhiteSpace($friendly)) {
+                if (-not [string]::IsNullOrWhiteSpace($f.path)) {
+                    try { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) } catch { $friendly = $f.path }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($friendly)) { $friendly = "(unnamed file)" }
+
             if (-not [string]::IsNullOrWhiteSpace($f.path)) {
-                try { $friendly = [System.IO.Path]::GetFileNameWithoutExtension($f.path) } catch { $friendly = $f.path }
+                $script:ModDisplayNames[$f.path] = $friendly
             }
         }
-        if ([string]::IsNullOrWhiteSpace($friendly)) { $friendly = "(unnamed file)" }
-
-        if (-not [string]::IsNullOrWhiteSpace($f.path)) {
-            $result.DisplayNames[$f.path] = $friendly
-        }
     }
-    return $result
+
+    return ($null -ne $script:PackIndex)
 }
 
-# ---------------------------------------------------------------------------
-# Reads the actual MC + mod-loader version straight out of the .mrpack's own
-# "dependencies" block instead of relying on the hardcoded top-of-script
-# constants. This is what makes "Select .mrpack..." actually safe to use
-# with a different/updated pack - before this, the installer always tried
-# to install Forge 47.4.20 for MC 1.20.1 no matter what pack was loaded.
-# Falls back to the script defaults only if a pack is missing/malformed
-# dependency info (keeps old packs working).
-# ---------------------------------------------------------------------------
-function Get-PackVersionInfo($index) {
-    $info = [PSCustomObject]@{
-        McVersion   = $McVersion
-        LoaderType  = "forge"
-        LoaderVersion = $ForgeVersion
-        Supported   = $true
-    }
-    if (-not $index -or -not $index.dependencies) { return $info }
-    $deps = $index.dependencies
-
-    if ($deps.PSObject.Properties.Name -contains "minecraft" -and $deps.minecraft) {
-        $info.McVersion = $deps.minecraft
-    }
-
-    if ($deps.PSObject.Properties.Name -contains "forge" -and $deps.forge) {
-        $info.LoaderType = "forge"
-        $info.LoaderVersion = $deps.forge
-        $info.Supported = $true
-    } elseif ($deps.PSObject.Properties.Name -contains "neoforge" -and $deps.neoforge) {
-        $info.LoaderType = "neoforge"
-        $info.LoaderVersion = $deps.neoforge
-        $info.Supported = $true
-    } elseif ($deps.PSObject.Properties.Name -contains "fabric-loader" -and $deps."fabric-loader") {
-        $info.LoaderType = "fabric"
-        $info.LoaderVersion = $deps."fabric-loader"
-        $info.Supported = $false
-    } elseif ($deps.PSObject.Properties.Name -contains "quilt-loader" -and $deps."quilt-loader") {
-        $info.LoaderType = "quilt"
-        $info.LoaderVersion = $deps."quilt-loader"
-        $info.Supported = $false
-    }
-    return $info
-}
-
-function Format-LoaderLabel($loaderType) {
-    switch ($loaderType) {
-        "forge"    { return "Forge" }
-        "neoforge" { return "NeoForge" }
-        "fabric"   { return "Fabric" }
-        "quilt"    { return "Quilt" }
-        default    { return $loaderType }
-    }
-}
-
-$script:MrpackFile = $MrpackFile
-$PackInfo = Load-PackInfo $script:MrpackFile
-$PackIndex = $PackInfo.Index
-$PackSummary = $PackInfo.Summary
-$ModDisplayNames = $PackInfo.DisplayNames
-$script:PackVersionInfo = Get-PackVersionInfo $PackIndex
+Load-Pack $MrpackFile | Out-Null
 
 # ---------------------------------------------------------------------------
 # Optional self-update check (GitHub Releases API) - silent if not configured
@@ -340,13 +290,13 @@ if ($GithubRepo) {
 # ---------------------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "PGC SMP Installer v$AppVersion"
-$form.Size = New-Object System.Drawing.Size(620, 754)
+$form.Size = New-Object System.Drawing.Size(620, 733)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "PGC SMP  -  Minecraft $($script:PackVersionInfo.McVersion)  |  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) $($script:PackVersionInfo.LoaderVersion)"
+$title.Text = "PGC SMP  -  Minecraft $McVersion  |  Forge $ForgeVersion"
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
 $title.Location = New-Object System.Drawing.Point(15, 12)
 $title.Size = New-Object System.Drawing.Size(470, 30)
@@ -364,84 +314,82 @@ $lblSummary = New-Object System.Windows.Forms.Label
 if ($PackSummary) {
     $lblSummary.Text = "$($PackSummary.ModCount) mods  -  approx $($PackSummary.TotalMB) MB to download"
 } else {
-    $lblSummary.Text = "PGC_SMP_1_0_0.mrpack not found next to this program."
+    $lblSummary.Text = T "MrpackMissing"
+}
+if ($UpdateAvailable) {
+    $lblSummary.Text += "   |   Update available: v$UpdateAvailable"
 }
 $lblSummary.ForeColor = [System.Drawing.Color]::DimGray
 $lblSummary.Location = New-Object System.Drawing.Point(15, 42)
 $lblSummary.Size = New-Object System.Drawing.Size(580, 20)
 $form.Controls.Add($lblSummary)
 
+# --- Modpack (.mrpack) file picker ------------------------------------------
+# Previously hardcoded to whatever PGC_SMP_1_0_0.mrpack happened to be sitting
+# next to the exe, with no way to point at a different pack without renaming
+# files by hand. Now it's a real path selector, same pattern as the Install
+# Path row below it.
 $lblMrpack = New-Object System.Windows.Forms.Label
-$lblMrpack.Text = "Modpack (.mrpack) file:"
+$lblMrpack.Text = T "MrpackLabel"
 $lblMrpack.Location = New-Object System.Drawing.Point(15, 64)
 $lblMrpack.Size = New-Object System.Drawing.Size(300, 18)
 $form.Controls.Add($lblMrpack)
 
 $txtMrpack = New-Object System.Windows.Forms.TextBox
-$txtMrpack.Location = New-Object System.Drawing.Point(15, 84)
+$txtMrpack.Location = New-Object System.Drawing.Point(15, 83)
 $txtMrpack.Size = New-Object System.Drawing.Size(480, 24)
-$txtMrpack.ReadOnly = $true
-$txtMrpack.Text = $script:MrpackFile
+$txtMrpack.Text = $MrpackFile
 $form.Controls.Add($txtMrpack)
 
-$btnSelectMrpack = New-Object System.Windows.Forms.Button
-$btnSelectMrpack.Text = "Select .mrpack..."
-$btnSelectMrpack.Location = New-Object System.Drawing.Point(505, 83)
-$btnSelectMrpack.Size = New-Object System.Drawing.Size(85, 26)
-$form.Controls.Add($btnSelectMrpack)
-
-if ($UpdateAvailable) {
-    $lblUpdate = New-Object System.Windows.Forms.Label
-    $lblUpdate.Text = "A newer installer version ($UpdateAvailable) is available."
-    $lblUpdate.ForeColor = [System.Drawing.Color]::DarkOrange
-    $lblUpdate.Location = New-Object System.Drawing.Point(15, 116)
-    $lblUpdate.Size = New-Object System.Drawing.Size(580, 18)
-    $form.Controls.Add($lblUpdate)
-}
+$btnBrowseMrpack = New-Object System.Windows.Forms.Button
+$btnBrowseMrpack.Text = "Browse..."
+$btnBrowseMrpack.Location = New-Object System.Drawing.Point(505, 82)
+$btnBrowseMrpack.Size = New-Object System.Drawing.Size(85, 26)
+$form.Controls.Add($btnBrowseMrpack)
 
 $lblLauncher = New-Object System.Windows.Forms.Label
 $lblLauncher.Text = T "Launcher"
-$lblLauncher.Location = New-Object System.Drawing.Point(15, 139)
+$lblLauncher.Location = New-Object System.Drawing.Point(15, 118)
 $lblLauncher.Size = New-Object System.Drawing.Size(300, 20)
 $form.Controls.Add($lblLauncher)
 
 $comboLaunchers = New-Object System.Windows.Forms.ComboBox
-$comboLaunchers.Location = New-Object System.Drawing.Point(15, 161)
+$comboLaunchers.Location = New-Object System.Drawing.Point(15, 140)
 $comboLaunchers.Size = New-Object System.Drawing.Size(480, 24)
 $comboLaunchers.DropDownStyle = "DropDownList"
 $form.Controls.Add($comboLaunchers)
 
 $btnRescan = New-Object System.Windows.Forms.Button
 $btnRescan.Text = "Rescan"
-$btnRescan.Location = New-Object System.Drawing.Point(505, 160)
+$btnRescan.Location = New-Object System.Drawing.Point(505, 139)
 $btnRescan.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnRescan)
 
 $lblPath = New-Object System.Windows.Forms.Label
 $lblPath.Text = T "Install"
-$lblPath.Location = New-Object System.Drawing.Point(15, 195)
+$lblPath.Location = New-Object System.Drawing.Point(15, 174)
 $lblPath.Size = New-Object System.Drawing.Size(90, 20)
 $form.Controls.Add($lblPath)
 
 $txtPath = New-Object System.Windows.Forms.TextBox
-$txtPath.Location = New-Object System.Drawing.Point(105, 193)
+$txtPath.Location = New-Object System.Drawing.Point(105, 172)
 $txtPath.Size = New-Object System.Drawing.Size(390, 24)
 $form.Controls.Add($txtPath)
 
 $btnBrowse = New-Object System.Windows.Forms.Button
 $btnBrowse.Text = "Browse..."
-$btnBrowse.Location = New-Object System.Drawing.Point(505, 192)
+$btnBrowse.Location = New-Object System.Drawing.Point(505, 171)
 $btnBrowse.Size = New-Object System.Drawing.Size(85, 26)
 $form.Controls.Add($btnBrowse)
 
 $lblRam = New-Object System.Windows.Forms.Label
 $lblRam.Text = T "Ram"
-$lblRam.Location = New-Object System.Drawing.Point(15, 227)
+$lblRam.Location = New-Object System.Drawing.Point(15, 206)
 $lblRam.Size = New-Object System.Drawing.Size(140, 20)
 $form.Controls.Add($lblRam)
 
 $numRam = New-Object System.Windows.Forms.NumericUpDown
-$numRam.Location = New-Object System.Drawing.Point(160, 225)
+$numRam.Location = New-Object System.Drawing.Point(160, 204)
 $numRam.Size = New-Object System.Drawing.Size(60, 24)
 $numRam.Minimum = 2
 $numRam.Maximum = 16
@@ -450,12 +398,12 @@ $form.Controls.Add($numRam)
 
 $lblMods = New-Object System.Windows.Forms.Label
 $lblMods.Text = T "Mods"
-$lblMods.Location = New-Object System.Drawing.Point(15, 259)
+$lblMods.Location = New-Object System.Drawing.Point(15, 238)
 $lblMods.Size = New-Object System.Drawing.Size(200, 20)
 $form.Controls.Add($lblMods)
 
 $listMods = New-Object System.Windows.Forms.ListBox
-$listMods.Location = New-Object System.Drawing.Point(15, 281)
+$listMods.Location = New-Object System.Drawing.Point(15, 260)
 $listMods.Size = New-Object System.Drawing.Size(575, 90)
 if ($PackIndex) {
     foreach ($f in ($PackIndex.files | Sort-Object { $ModDisplayNames[$_.path] })) {
@@ -465,7 +413,7 @@ if ($PackIndex) {
 $form.Controls.Add($listMods)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(15, 382)
+$progressBar.Location = New-Object System.Drawing.Point(15, 361)
 $progressBar.Size = New-Object System.Drawing.Size(575, 24)
 $progressBar.Minimum = 0
 $progressBar.Maximum = 100
@@ -473,7 +421,7 @@ $form.Controls.Add($progressBar)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = T "Ready"
-$lblStatus.Location = New-Object System.Drawing.Point(15, 410)
+$lblStatus.Location = New-Object System.Drawing.Point(15, 389)
 $lblStatus.Size = New-Object System.Drawing.Size(575, 20)
 $form.Controls.Add($lblStatus)
 
@@ -483,104 +431,65 @@ $txtLog.ReadOnly = $true
 $txtLog.BackColor = [System.Drawing.Color]::Black
 $txtLog.ForeColor = [System.Drawing.Color]::Gainsboro
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$txtLog.Location = New-Object System.Drawing.Point(15, 436)
+$txtLog.Location = New-Object System.Drawing.Point(15, 415)
 $txtLog.Size = New-Object System.Drawing.Size(575, 200)
 $form.Controls.Add($txtLog)
 
 $btnInstall = New-Object System.Windows.Forms.Button
 $btnInstall.Text = T "InstallBtn"
-$btnInstall.Location = New-Object System.Drawing.Point(15, 646)
+$btnInstall.Location = New-Object System.Drawing.Point(15, 625)
 $btnInstall.Size = New-Object System.Drawing.Size(120, 34)
 $btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($btnInstall)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = T "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(145, 646)
+$btnCancel.Location = New-Object System.Drawing.Point(145, 625)
 $btnCancel.Size = New-Object System.Drawing.Size(100, 34)
 $btnCancel.Enabled = $false
 $form.Controls.Add($btnCancel)
 
 $btnOpenFolder = New-Object System.Windows.Forms.Button
 $btnOpenFolder.Text = T "OpenFolder"
-$btnOpenFolder.Location = New-Object System.Drawing.Point(255, 646)
+$btnOpenFolder.Location = New-Object System.Drawing.Point(255, 625)
 $btnOpenFolder.Size = New-Object System.Drawing.Size(110, 34)
 $btnOpenFolder.Enabled = $false
 $form.Controls.Add($btnOpenFolder)
 
 $btnSaveLog = New-Object System.Windows.Forms.Button
 $btnSaveLog.Text = T "SaveLog"
-$btnSaveLog.Location = New-Object System.Drawing.Point(375, 646)
+$btnSaveLog.Location = New-Object System.Drawing.Point(375, 625)
 $btnSaveLog.Size = New-Object System.Drawing.Size(90, 34)
 $form.Controls.Add($btnSaveLog)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
 $btnUninstall.Text = T "Uninstall"
-$btnUninstall.Location = New-Object System.Drawing.Point(475, 646)
+$btnUninstall.Location = New-Object System.Drawing.Point(475, 625)
 $btnUninstall.Size = New-Object System.Drawing.Size(115, 34)
 $form.Controls.Add($btnUninstall)
 
-# ---------------------------------------------------------------------------
-# Re-runs Load-PackInfo against whatever $script:MrpackFile currently points
-# at, and refreshes every control that shows pack info (summary line, mod
-# list). Called once at startup implicitly (the vars are already populated
-# above) and again every time "Select .mrpack..." picks a new file.
-# ---------------------------------------------------------------------------
-function Refresh-PackInfo {
-    $info = Load-PackInfo $script:MrpackFile
-    $script:PackIndex = $info.Index
-    $script:PackSummary = $info.Summary
-    $script:ModDisplayNames = $info.DisplayNames
-    $script:PackVersionInfo = Get-PackVersionInfo $script:PackIndex
+if (-not (Test-Path $MrpackFile)) {
+    [System.Windows.Forms.MessageBox]::Show(
+        "No PGC_SMP_1_0_0.mrpack found next to this program.`nClick 'Browse...' next to 'Modpack (.mrpack) file' to select one.",
+        "PGC SMP Installer", "OK", "Information") | Out-Null
+}
 
-    $txtMrpack.Text = $script:MrpackFile
-    $title.Text = "PGC SMP  -  Minecraft $($script:PackVersionInfo.McVersion)  |  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) $($script:PackVersionInfo.LoaderVersion)"
-
+# Re-renders the summary label + mod list from whatever's currently loaded in
+# $script:PackIndex/$script:PackSummary/$script:ModDisplayNames. Called once
+# implicitly via the initial Load-Pack above, and again any time the user
+# picks a different .mrpack file.
+function Refresh-PackDisplay {
     if ($script:PackSummary) {
         $lblSummary.Text = "$($script:PackSummary.ModCount) mods  -  approx $($script:PackSummary.TotalMB) MB to download"
-        $lblSummary.ForeColor = [System.Drawing.Color]::DimGray
-        if (-not $script:PackVersionInfo.Supported) {
-            $lblSummary.Text += "  -  $(Format-LoaderLabel $script:PackVersionInfo.LoaderType) auto-install isn't supported yet; mods/configs still install, loader must be added manually."
-            $lblSummary.ForeColor = [System.Drawing.Color]::DarkOrange
-        }
-    } elseif ($script:MrpackFile -and (Test-Path $script:MrpackFile)) {
-        $lblSummary.Text = "Could not read a valid modpack from the selected .mrpack file."
-        $lblSummary.ForeColor = [System.Drawing.Color]::Firebrick
     } else {
-        $lblSummary.Text = "No .mrpack selected yet - click 'Select .mrpack...' to choose one."
-        $lblSummary.ForeColor = [System.Drawing.Color]::Firebrick
+        $lblSummary.Text = T "MrpackMissing"
     }
-
     $listMods.Items.Clear()
     if ($script:PackIndex) {
         foreach ($f in ($script:PackIndex.files | Sort-Object { $script:ModDisplayNames[$_.path] })) {
             Add-SafeListItem $listMods $script:ModDisplayNames[$f.path]
         }
     }
-}
-
-$btnSelectMrpack.Add_Click({
-    $ofd = New-Object System.Windows.Forms.OpenFileDialog
-    $ofd.Filter = "Modrinth Modpack (*.mrpack)|*.mrpack|All files (*.*)|*.*"
-    $ofd.Title = "Select a .mrpack modpack file"
-    try {
-        if ($script:MrpackFile -and (Test-Path $script:MrpackFile)) {
-            $ofd.InitialDirectory = Split-Path -Parent $script:MrpackFile
-        } else {
-            $ofd.InitialDirectory = $ScriptDir
-        }
-    } catch { }
-
-    if ($ofd.ShowDialog() -eq "OK") {
-        $script:MrpackFile = $ofd.FileName
-        Refresh-PackInfo
-    }
-})
-
-if (-not (Test-Path $script:MrpackFile)) {
-    [System.Windows.Forms.MessageBox]::Show(
-        "Could not find PGC_SMP_1_0_0.mrpack next to this program.`nUse the 'Select .mrpack...' button to point the installer at a modpack file.",
-        "PGC SMP Installer", "OK", "Warning") | Out-Null
 }
 
 function Populate-Launchers {
@@ -618,15 +527,36 @@ $comboLang.Add_SelectedIndexChanged({
     $lblPath.Text = T "Install"
     $lblRam.Text = T "Ram"
     $lblMods.Text = T "Mods"
+    $lblMrpack.Text = T "MrpackLabel"
     $btnInstall.Text = T "InstallBtn"
     $btnCancel.Text = T "Cancel"
     $btnOpenFolder.Text = T "OpenFolder"
     $btnSaveLog.Text = T "SaveLog"
     $btnUninstall.Text = T "Uninstall"
+    if (-not $script:PackSummary) { $lblSummary.Text = T "MrpackMissing" }
     if (-not $sync -or $sync.Status -eq "Idle" -or $sync.Done) { $lblStatus.Text = T "Ready" }
 })
 
 $btnRescan.Add_Click({ Populate-Launchers })
+
+$btnBrowseMrpack.Add_Click({
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Title = "Select a modpack (.mrpack) file"
+    $ofd.Filter = "Modrinth Modpack (*.mrpack)|*.mrpack|All files (*.*)|*.*"
+    $initialDir = Split-Path $txtMrpack.Text -Parent -ErrorAction SilentlyContinue
+    if ($initialDir -and (Test-Path $initialDir)) { $ofd.InitialDirectory = $initialDir }
+    if ($ofd.ShowDialog() -eq "OK") {
+        $txtMrpack.Text = $ofd.FileName
+        $script:MrpackFile = $ofd.FileName
+        $ok = Load-Pack $ofd.FileName
+        Refresh-PackDisplay
+        if (-not $ok) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not read that file as a valid .mrpack modpack.`nMake sure it's an unmodified Modrinth modpack export.",
+                "PGC SMP Installer", "OK", "Error") | Out-Null
+        }
+    }
+})
 
 $btnBrowse.Add_Click({
     $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -706,16 +636,10 @@ $sync = [hashtable]::Synchronized(@{
     OkCount  = 0
     FailCount = 0
     SkipCount = 0
-    CompletedCount = 0
 })
 
 $installScript = {
-    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $LoaderType, $LoaderVersion, $DotMinecraft, $RamGB, $ModNamesMap, $MaxConcurrentDownloads)
-
-    # Forge/NeoForge use a "<mc>-<loader>" combined version string and a
-    # "<mc>-forge-<loader>" / "<mc>-neoforge-<loader>" launcher version id.
-    $ForgeFullVersion = "$McVersion-$LoaderVersion"
-    $ForgeVersionId = "$McVersion-$LoaderType-$LoaderVersion"
+    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft, $RamGB, $ModNamesMap)
 
     function Log($m)      { $sync.Log.Add($m) | Out-Null }
     function SetProgress($p) { $sync.Progress = [int]$p }
@@ -756,87 +680,6 @@ $installScript = {
     }
 
     # -----------------------------------------------------------------------
-    # Downloads many files concurrently (bounded by $maxConcurrent) using a
-    # RunspacePool - this is the "fast installer" change. The old version
-    # downloaded one mod at a time; on a pack with 80+ mods that means 80+
-    # sequential round-trips even when the connection has plenty of headroom
-    # for several transfers at once. Each worker is a fully self-contained
-    # scriptblock (own WebClient, own retry loop, own sha1 check) since a
-    # RunspacePool worker doesn't inherit functions from this outer scope.
-    # -----------------------------------------------------------------------
-    function Download-FilesParallel($jobs, $maxConcurrent) {
-        if ($jobs.Count -eq 0) { return }
-
-        $downloadWorker = {
-            param($sync, $url, $destPath, $expectedSha1, $displayName, $idx, $total)
-            function Get-Sha1Hash($p) { (Get-FileHash -Path $p -Algorithm SHA1).Hash.ToLower() }
-            function Add-Count($name) {
-                [System.Threading.Monitor]::Enter($sync)
-                try { $sync[$name] = $sync[$name] + 1 } finally { [System.Threading.Monitor]::Exit($sync) }
-            }
-            $attempt = 0
-            $ok = $false
-            $lastErr = $null
-            while ($attempt -lt 3 -and -not $ok -and -not $sync.Cancel) {
-                $attempt++
-                try {
-                    $wc = New-Object System.Net.WebClient
-                    $wc.DownloadFile($url, $destPath)
-                    $wc.Dispose()
-                    if (-not $expectedSha1 -or (Get-Sha1Hash $destPath) -eq $expectedSha1) {
-                        $ok = $true
-                    } else {
-                        $lastErr = "hash mismatch"
-                    }
-                } catch {
-                    $lastErr = $_.Exception.Message
-                }
-            }
-            if ($ok) {
-                [void]$sync.Log.Add("[$idx/$total] downloaded: $displayName")
-                Add-Count "OkCount"
-            } elseif (-not $sync.Cancel) {
-                [void]$sync.Log.Add("[X] Giving up on $displayName after 3 attempts - $lastErr")
-                Add-Count "FailCount"
-            }
-            Add-Count "CompletedCount"
-        }
-
-        $pool = [runspacefactory]::CreateRunspacePool(1, [Math]::Max(1, $maxConcurrent))
-        $pool.Open()
-        $handles = New-Object System.Collections.Generic.List[object]
-        try {
-            foreach ($j in $jobs) {
-                if ($sync.Cancel) { break }
-                $p = [powershell]::Create()
-                $p.RunspacePool = $pool
-                [void]$p.AddScript($downloadWorker).AddArgument($sync).AddArgument($j.Url).AddArgument($j.DestPath).AddArgument($j.ExpectedSha1).AddArgument($j.DisplayName).AddArgument($j.Index).AddArgument($j.Total)
-                $handles.Add(@{ PS = $p; AR = $p.BeginInvoke() })
-            }
-
-            while ($true) {
-                $pending = @($handles | Where-Object { -not $_.AR.IsCompleted })
-                $doneCount = [int]$sync.CompletedCount
-                SetProgress (15 + [math]::Floor((70.0 * $doneCount / [math]::Max($jobs.Count, 1))))
-                SetStatus "Downloading mods - $doneCount/$($jobs.Count) done ($maxConcurrent at a time)..."
-                if ($pending.Count -eq 0) { break }
-                if ($sync.Cancel) {
-                    foreach ($h in $pending) { try { $h.PS.Stop() } catch { } }
-                    break
-                }
-                Start-Sleep -Milliseconds 200
-            }
-        } finally {
-            foreach ($h in $handles) {
-                try { $h.PS.EndInvoke($h.AR) | Out-Null } catch { }
-                try { $h.PS.Dispose() } catch { }
-            }
-            $pool.Close()
-            $pool.Dispose()
-        }
-    }
-
-    # -----------------------------------------------------------------------
     # "PC checker" - basic system requirements sanity check. Logs warnings for
     # soft issues (low RAM vs requested allocation) and returns $false only
     # for hard blockers (32-bit OS, which can't run 64-bit Java/Minecraft/Forge
@@ -873,142 +716,6 @@ $installScript = {
         return $ok
     }
 
-    # -----------------------------------------------------------------------
-    # Scans every place a Java install could realistically be - not just
-    # whatever "java" resolves to on PATH (which is what the old version
-    # checked, and which silently missed installs that hadn't updated PATH,
-    # or JAVA_HOME-only installs). Returns objects with .Path/.Major/.Source
-    # so the caller can pick the best match and use its *full path* directly,
-    # rather than depending on PATH being refreshed mid-process (it isn't -
-    # a child process only sees PATH changes made after it started).
-    # -----------------------------------------------------------------------
-    function Get-InstalledJavaCandidates {
-        $candidates = New-Object System.Collections.Generic.List[object]
-
-        function Add-Candidate($exePath, $source) {
-            if (-not $exePath -or -not (Test-Path $exePath)) { return }
-            try {
-                $out = & $exePath -version 2>&1 | Out-String
-                # Handles both old-style "1.8.0_301" and new-style "17.0.9" version strings.
-                if ($out -match 'version "1\.(\d+)\.') {
-                    $major = [int]$matches[1]
-                } elseif ($out -match 'version "(\d+)') {
-                    $major = [int]$matches[1]
-                } else {
-                    return
-                }
-                $candidates.Add([PSCustomObject]@{ Path = $exePath; Major = $major; Source = $source })
-            } catch { }
-        }
-
-        Add-Candidate "java" "PATH"
-
-        if ($env:JAVA_HOME) {
-            Add-Candidate (Join-Path $env:JAVA_HOME "bin\java.exe") "JAVA_HOME"
-        }
-
-        $regRoots = @(
-            "HKLM:\SOFTWARE\Eclipse Adoptium\JDK",
-            "HKLM:\SOFTWARE\Eclipse Adoptium\JRE",
-            "HKLM:\SOFTWARE\WOW6432Node\Eclipse Adoptium\JDK",
-            "HKLM:\SOFTWARE\JavaSoft\JDK",
-            "HKLM:\SOFTWARE\JavaSoft\Java Runtime Environment",
-            "HKLM:\SOFTWARE\WOW6432Node\JavaSoft\Java Runtime Environment"
-        )
-        foreach ($root in $regRoots) {
-            try {
-                if (Test-Path $root) {
-                    foreach ($verKey in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
-                        # NOTE: named $javaHomePath, not $home - $home is a read-only
-                        # PowerShell automatic variable (same bug class as the $pid issue
-                        # fixed elsewhere in this file). It would've silently swallowed
-                        # every registry-based detection attempt instead of crashing,
-                        # since this is inside a try/catch - just as bad, harder to notice.
-                        $javaHomePath = (Get-ItemProperty -Path $verKey.PSPath -ErrorAction SilentlyContinue).JavaHome
-                        if ($javaHomePath) { Add-Candidate (Join-Path $javaHomePath "bin\java.exe") "Registry" }
-                    }
-                }
-            } catch { }
-        }
-
-        foreach ($base in @("C:\Program Files\Eclipse Adoptium", "C:\Program Files\Java", "C:\Program Files\Microsoft")) {
-            try {
-                if (Test-Path $base) {
-                    foreach ($dir in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) {
-                        Add-Candidate (Join-Path $dir.FullName "bin\java.exe") "Common install path"
-                    }
-                }
-            } catch { }
-        }
-
-        return $candidates
-    }
-
-    # -----------------------------------------------------------------------
-    # Auto-installs Java via Adoptium's official API instead of opening a
-    # browser tab and asking the player to do it manually. Uses the real
-    # signed Eclipse Temurin MSI and installs it silently.
-    #
-    # NOTE on elevation: installing Java system-wide requires admin rights.
-    # If this process isn't already elevated, Start-Process -Verb RunAs
-    # triggers Windows' normal UAC "Do you want to allow this app..." prompt.
-    # That prompt is expected and is Windows' own legitimate mechanism for
-    # privilege escalation - there is no way (and no reason to try) to
-    # silently bypass it. Attempting to would be exactly the kind of
-    # behavior antivirus software correctly flags as malicious.
-    # -----------------------------------------------------------------------
-    function Install-JavaSilently($majorVersion) {
-        SetStatus "Looking up latest Java $majorVersion (Adoptium API)..."
-        try {
-            $apiUrl = "https://api.adoptium.net/v3/assets/latest/$majorVersion/hotspot?architecture=x64&image_type=jre&os=windows&vendor=eclipse"
-            $assets = Invoke-RestMethod -Uri $apiUrl -Method Get -TimeoutSec 20
-            $asset = $assets | Select-Object -First 1
-            if (-not $asset -or -not $asset.binary.installer.link) {
-                Log "[X] Adoptium API returned no installer for Java $majorVersion x64 Windows."
-                return $null
-            }
-        } catch {
-            Log "[X] Could not reach Adoptium's API: $($_.Exception.Message)"
-            return $null
-        }
-
-        $msiUrl = $asset.binary.installer.link
-        $msiName = Split-Path -Leaf ([Uri]$msiUrl).LocalPath
-        $msiPath = Join-Path $WorkDir $msiName
-        Log "[OK] Found Java $($asset.version.openjdk_version) - downloading installer..."
-
-        $err = Download-WithProgress $msiUrl $msiPath "Java $majorVersion installer"
-        if ($err) { Log "[X] Java installer download failed: $err"; return $null }
-        Log "[OK] Java installer downloaded."
-
-        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        $msiArgs = "/i `"$msiPath`" /quiet /norestart ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJavaHome"
-
-        SetStatus "Installing Java $majorVersion (a Windows permission prompt may appear - click Yes)..."
-        Log "[..] Installing Java $majorVersion silently via msiexec..."
-        try {
-            if ($isAdmin) {
-                $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -WindowStyle Hidden
-            } else {
-                $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -Verb RunAs
-            }
-        } catch {
-            # Most common cause here: the user clicked "No" on the UAC prompt.
-            Log "[X] Java install did not run: $($_.Exception.Message)"
-            return $null
-        }
-
-        # 0 = success, 3010 = success but a reboot is recommended (fine to continue).
-        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-            Log "[X] Java installer exited with code $($proc.ExitCode)."
-            return $null
-        }
-
-        Log "[OK] Java $majorVersion installed."
-        $fresh = Get-InstalledJavaCandidates | Where-Object { $_.Major -ge $majorVersion } | Select-Object -First 1
-        return $fresh
-    }
-
     try {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $InstallDir "mods") -Force | Out-Null
@@ -1039,60 +746,19 @@ $installScript = {
             $sync.Failed = $true; $sync.Done = $true; return
         }
 
-        $javaExePath = "java"
         if ($UseOfficial) {
-            $requiredJavaMajor = 17
-            SetStatus "Checking for Java $requiredJavaMajor+..."
-            $javaCandidates = Get-InstalledJavaCandidates | Where-Object { $_.Major -ge $requiredJavaMajor } | Sort-Object Major -Descending
-            $best = $javaCandidates | Select-Object -First 1
-
-            if ($best) {
-                Log "[OK] Java $($best.Major) found ($($best.Source)): $($best.Path)"
-                $javaExePath = $best.Path
+            # This installer only extracts/copies modpack files (mods, configs,
+            # resourcepacks, overrides) - it does not check, download, or install
+            # Java or Forge. If you're using the Official Minecraft Launcher,
+            # make sure Forge $ForgeVersion for Minecraft $McVersion is already
+            # installed (files.minecraftforge.net) before launching the "PGC SMP"
+            # profile this installer creates - otherwise the profile will exist
+            # but won't have a working game version to launch.
+            $versionFolder = Join-Path $DotMinecraft "versions\$ForgeVersionId"
+            if (Test-Path $versionFolder) {
+                Log "[OK] Forge $ForgeVersion already installed."
             } else {
-                Log "[!] No Java $requiredJavaMajor+ install found on this PC. Auto-installing Eclipse Temurin $requiredJavaMajor via Adoptium's official API..."
-                $installed = Install-JavaSilently $requiredJavaMajor
-                if ($installed) {
-                    Log "[OK] Java $($installed.Major) auto-installed and verified: $($installed.Path)"
-                    $javaExePath = $installed.Path
-                } else {
-                    # Last-resort fallback only if the fully-automatic path genuinely
-                    # couldn't complete (offline, UAC declined, no matching build, etc).
-                    Log "[X] Automatic Java install didn't complete. Opening the manual download page instead - install Java $requiredJavaMajor+, then run this installer again."
-                    Start-Process "https://adoptium.net/temurin/releases/?version=$requiredJavaMajor"
-                    $sync.Failed = $true; $sync.Done = $true; return
-                }
-            }
-
-            if ($LoaderType -eq "forge" -or $LoaderType -eq "neoforge") {
-                $loaderLabel = if ($LoaderType -eq "neoforge") { "NeoForge" } else { "Forge" }
-                SetStatus "Checking $loaderLabel installation..."
-                $versionFolder = Join-Path $DotMinecraft "versions\$ForgeVersionId"
-                if (Test-Path $versionFolder) {
-                    Log "[OK] $loaderLabel $LoaderVersion already installed."
-                } else {
-                    SetStatus "Downloading $loaderLabel installer..."
-                    if ($LoaderType -eq "neoforge") {
-                        $loaderUrl = "https://maven.neoforged.net/releases/net/neoforged/neoforge/$LoaderVersion/neoforge-$LoaderVersion-installer.jar"
-                    } else {
-                        $loaderUrl = "https://maven.minecraftforge.net/net/minecraftforge/forge/$ForgeFullVersion/forge-$ForgeFullVersion-installer.jar"
-                    }
-                    $loaderJar = Join-Path $WorkDir "loader-installer.jar"
-                    $err = Download-WithProgress $loaderUrl $loaderJar "$loaderLabel installer"
-                    if ($err) { Log "[X] $loaderLabel installer download failed: $err" }
-                    else { Log "[OK] $loaderLabel installer downloaded." }
-
-                    SetStatus "Installing $loaderLabel (this can take a minute)..."
-                    $proc = Start-Process -FilePath $javaExePath -ArgumentList @("-jar", "`"$loaderJar`"", "--installClient", "`"$DotMinecraft`"") -Wait -PassThru -WindowStyle Hidden
-                    if ($proc.ExitCode -ne 0 -or -not (Test-Path $versionFolder)) {
-                        Log "[X] $loaderLabel install may have failed (exit code $($proc.ExitCode)). Run loader-installer.jar manually from $WorkDir and choose 'Install Client'."
-                    } else {
-                        Log "[OK] $loaderLabel $LoaderVersion installed."
-                    }
-                }
-            } else {
-                $loaderLabel = if ($LoaderType -eq "quilt") { "Quilt" } elseif ($LoaderType -eq "fabric") { "Fabric" } else { $LoaderType }
-                Log "[!] $loaderLabel modpacks aren't auto-installed by this installer yet. Mods, configs and overrides will still be placed in the install folder, but you'll need to install $loaderLabel loader $LoaderVersion for Minecraft $McVersion yourself (official $loaderLabel installer) before the launcher profile below can run."
+                Log "[!] Forge $ForgeVersion for Minecraft $McVersion isn't installed yet. This installer only places the modpack's mod/config files - it doesn't install Forge or Java. Install Forge $ForgeVersion from https://files.minecraftforge.net first, then launch the 'PGC SMP' profile."
             }
         }
         SetProgress 10
@@ -1106,7 +772,6 @@ $installScript = {
         SetProgress 15
 
         $total = $index.files.Count
-        $jobs = New-Object System.Collections.Generic.List[object]
         $i = 0
         foreach ($file in $index.files) {
             if ($sync.Cancel) { Log "[!] Cancelled by user."; break }
@@ -1125,19 +790,31 @@ $installScript = {
             }
 
             if ($needsDownload) {
-                $jobs.Add(@{ Url = $file.downloads[0]; DestPath = $destPath; ExpectedSha1 = $expectedSha1; DisplayName = $displayName; Index = $i; Total = $total })
+                $attempt = 0
+                $ok = $false
+                while ($attempt -lt 3 -and -not $ok -and -not $sync.Cancel) {
+                    $attempt++
+                    $err = Download-WithProgress $file.downloads[0] $destPath $displayName
+                    if (-not $err -and (Test-Path $destPath)) {
+                        $actualSha1 = (Get-FileHash -Path $destPath -Algorithm SHA1).Hash.ToLower()
+                        if (-not $expectedSha1 -or $actualSha1 -eq $expectedSha1) {
+                            $ok = $true
+                            $sync.OkCount++
+                            Log "[$i/$total] downloaded: $displayName"
+                        } else {
+                            Log "[$i/$total] hash mismatch (attempt $attempt): $displayName"
+                        }
+                    } else {
+                        Log "[$i/$total] retry $attempt failed: $displayName - $err"
+                    }
+                }
+                if (-not $ok -and -not $sync.Cancel) { Log "[X] Giving up on $displayName after 3 attempts."; $sync.FailCount++ }
             } else {
                 $sync.SkipCount++
                 Log "[$i/$total] already up to date: $displayName"
             }
+            SetProgress (15 + [math]::Floor((70.0 * $i / [math]::Max($total,1))))
         }
-
-        if (-not $sync.Cancel -and $jobs.Count -gt 0) {
-            Log "[OK] $($jobs.Count) file(s) to download - up to $MaxConcurrentDownloads at once."
-            $sync.CompletedCount = 0
-            Download-FilesParallel $jobs $MaxConcurrentDownloads
-        }
-        SetProgress 85
 
         if ($sync.Cancel) { $sync.Done = $true; return }
 
@@ -1149,7 +826,7 @@ $installScript = {
         }
         SetProgress 90
 
-        if ($UseOfficial -and ($LoaderType -eq "forge" -or $LoaderType -eq "neoforge")) {
+        if ($UseOfficial) {
             SetStatus "Registering launcher profile..."
             $profilesFile = Join-Path $DotMinecraft "launcher_profiles.json"
             $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
@@ -1183,9 +860,6 @@ $installScript = {
             $profilesJson.profiles | Add-Member -MemberType NoteProperty -Name "PGC_SMP" -Value $newProfile -Force
             $profilesJson | ConvertTo-Json -Depth 10 | Set-Content -Path $profilesFile -Encoding UTF8
             Log "[OK] 'PGC SMP' profile registered in the Official Launcher ($RamGB GB RAM)."
-        } elseif ($UseOfficial) {
-            Log "[OK] Files placed in: $InstallDir"
-            Log "     No launcher profile was registered - install $LoaderType loader $LoaderVersion for Minecraft $McVersion first (see warning above), then add a custom profile pointing at this folder."
         } else {
             Log "[OK] Files placed in: $InstallDir"
             Log "     If your launcher needs manual import, point it at this folder."
@@ -1204,16 +878,17 @@ $installScript = {
 }
 
 $btnInstall.Add_Click({
-    if (-not $script:MrpackFile -or -not (Test-Path $script:MrpackFile)) {
+    $selectedMrpack = $txtMrpack.Text
+    if ([string]::IsNullOrWhiteSpace($selectedMrpack) -or -not (Test-Path $selectedMrpack)) {
         [System.Windows.Forms.MessageBox]::Show(
-            "No valid .mrpack file selected.`nClick 'Select .mrpack...' and choose a modpack file first.",
-            "PGC SMP Installer", "OK", "Error") | Out-Null
+            "Please select a valid .mrpack file first (click 'Browse...' next to 'Modpack (.mrpack) file').",
+            "PGC SMP Installer", "OK", "Warning") | Out-Null
         return
     }
     if (-not $script:PackIndex) {
         [System.Windows.Forms.MessageBox]::Show(
-            "The selected file could not be read as a valid .mrpack modpack.`nPick a different file with 'Select .mrpack...'.",
-            "PGC SMP Installer", "OK", "Error") | Out-Null
+            "That .mrpack file couldn't be read. Pick a different one before installing.",
+            "PGC SMP Installer", "OK", "Warning") | Out-Null
         return
     }
 
@@ -1221,24 +896,22 @@ $btnInstall.Add_Click({
     $btnCancel.Enabled = $true
     $comboLaunchers.Enabled = $false
     $btnBrowse.Enabled = $false
+    $btnBrowseMrpack.Enabled = $false
     $btnRescan.Enabled = $false
     $btnUninstall.Enabled = $false
-    $btnSelectMrpack.Enabled = $false
     $txtLog.Clear()
     $sync.Log.Clear()
     $sync.Progress = 0
     $sync.Done = $false
     $sync.Failed = $false
     $sync.Cancel = $false
-    $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0; $sync.CompletedCount = 0
+    $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0
 
     $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
     $useOfficial = $selectedName -like "Official Minecraft Launcher*"
     $dotMinecraft = $script:DetectedPaths[$selectedName]
     $installDir = $txtPath.Text
     $ramGB = [int]$numRam.Value
-    $verInfo = $script:PackVersionInfo
-    $maxConcurrentDownloads = 6
 
     $Settings.LastInstallPath = $installDir
     $Settings.RamGB = $ramGB
@@ -1248,7 +921,7 @@ $btnInstall.Add_Click({
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($script:MrpackFile).AddArgument($WorkDir).AddArgument($verInfo.McVersion).AddArgument($verInfo.LoaderType).AddArgument($verInfo.LoaderVersion).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames).AddArgument($maxConcurrentDownloads) | Out-Null
+    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($selectedMrpack).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames) | Out-Null
     $asyncResult = $ps.BeginInvoke()
 
     $timer = New-Object System.Windows.Forms.Timer
@@ -1271,9 +944,9 @@ $btnInstall.Add_Click({
             $btnCancel.Enabled = $false
             $comboLaunchers.Enabled = $true
             $btnBrowse.Enabled = $true
+            $btnBrowseMrpack.Enabled = $true
             $btnRescan.Enabled = $true
             $btnUninstall.Enabled = $true
-            $btnSelectMrpack.Enabled = $true
             if (Test-Path $installDir) { $btnOpenFolder.Enabled = $true }
             if ($sync.Cancel) {
                 [System.Windows.Forms.MessageBox]::Show("Installation cancelled.", "PGC SMP Installer", "OK", "Warning") | Out-Null
