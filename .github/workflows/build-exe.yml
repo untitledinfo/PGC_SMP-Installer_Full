@@ -1,0 +1,67 @@
+name: Build PGC SMP Installer EXE
+
+# Runs on a Windows GitHub-hosted runner (ps2exe needs real Windows PowerShell)
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "Install-PGC-SMP-GUI.ps1"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ps2exe
+        shell: powershell
+        run: |
+          Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber
+
+      - name: Compile Install-PGC-SMP-GUI.ps1 -> PGC_SMP_Installer.exe
+        shell: powershell
+        run: |
+          Import-Module ps2exe -Force
+          Invoke-ps2exe -inputFile ".\Install-PGC-SMP-GUI.ps1" `
+                         -outputFile ".\PGC_SMP_Installer.exe" `
+                         -noConsole `
+                         -title "PGC SMP Installer" `
+                         -description "PGC SMP One-Click Modpack Installer" `
+                         -company "PGC" `
+                         -product "PGC SMP Installer" `
+                         -version "1.2.0.0" `
+                         -requireAdmin:$false
+
+      - name: Upload exe as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PGC_SMP_Installer
+          path: PGC_SMP_Installer.exe
+          retention-days: 30
+
+      # Optional: also bundle the exe with the .mrpack ready to distribute.
+      # Only runs if PGC_SMP_1_0_0.mrpack is committed to the repo (it's ~6MB,
+      # fine for a repo, but consider Git LFS or a Release asset instead if it grows).
+      - name: Bundle exe + mrpack (if present)
+        shell: powershell
+        run: |
+          if (Test-Path ".\PGC_SMP_1_0_0.mrpack") {
+            New-Item -ItemType Directory -Path ".\dist" -Force | Out-Null
+            Copy-Item ".\PGC_SMP_Installer.exe" ".\dist\"
+            Copy-Item ".\PGC_SMP_1_0_0.mrpack" ".\dist\"
+            Compress-Archive -Path ".\dist\*" -DestinationPath ".\PGC-SMP-Installer-Bundle.zip" -Force
+          } else {
+            Write-Host "No .mrpack found in repo root - skipping bundle zip."
+          }
+
+      - name: Upload bundle zip (if created)
+        uses: actions/upload-artifact@v4
+        if: hashFiles('PGC-SMP-Installer-Bundle.zip') != ''
+        with:
+          name: PGC-SMP-Installer-Bundle
+          path: PGC-SMP-Installer-Bundle.zip
+          retention-days: 30
