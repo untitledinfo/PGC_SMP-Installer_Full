@@ -99,6 +99,8 @@ $Strings = @{
         Mods       = "Mods included:"
         MrpackLabel = "Modpack (.mrpack) file:"
         MrpackMissing = "No modpack file loaded yet - click Browse to select a .mrpack file."
+        VerifyBtn = "Verify Files"
+        CheckUpdateBtn = "Check for Updates"
     }
     UR = @{
         Launcher   = "Launcher / install folder mila:"
@@ -113,6 +115,8 @@ $Strings = @{
         Mods       = "Mods shamil:"
         MrpackLabel = "Modpack (.mrpack) faayl:"
         MrpackMissing = "Abhi tak koi modpack file load nahi hui - Browse per click karke .mrpack file chunein."
+        VerifyBtn = "Files Verify Karo"
+        CheckUpdateBtn = "Updates Check Karo"
     }
 }
 $Lang = if ($Settings.Language -eq "UR") { "UR" } else { "EN" }
@@ -137,6 +141,26 @@ function Get-IndexFromMrpack($mrpackPath) {
 }
 
 # ---------------------------------------------------------------------------
+# Generic retry wrapper for external API calls (Modrinth, GitHub). A single
+# transient network blip used to mean "give up silently, fall back to
+# filenames/no update info" - this retries a couple of times with a short
+# backoff first, which is enough to ride out most flaky-wifi hiccups without
+# making the UI feel like it's hanging (kept short: 2 retries, <1s total).
+# ---------------------------------------------------------------------------
+function Invoke-ApiWithRetry([scriptblock]$Call, [int]$MaxAttempts = 3) {
+    $attempt = 0
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+        try {
+            return & $Call
+        } catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Modrinth API: batch-resolve friendly mod names instead of raw jar filenames.
 # Best-effort - if there's no internet yet, or the API is unreachable, this
 # silently falls back to filenames, it never blocks the installer.
@@ -154,10 +178,10 @@ function Get-ModrinthNames($index) {
     try {
         $idsJson = ($projectIds | ForEach-Object { '"' + $_ + '"' }) -join ","
         $url = "https://api.modrinth.com/v2/projects?ids=[$idsJson]"
-        $resp = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 8
+        $resp = Invoke-ApiWithRetry { Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 8 }
         foreach ($proj in $resp) { $names[$proj.id] = $proj.title }
     } catch {
-        # offline or API down - filenames will be used instead, no big deal
+        # offline or API down after retries - filenames will be used instead, no big deal
     }
     return $names
 }
@@ -273,24 +297,32 @@ function Load-Pack($path) {
 Load-Pack $MrpackFile | Out-Null
 
 # ---------------------------------------------------------------------------
-# Optional self-update check (GitHub Releases API) - silent if not configured
-# or offline; never blocks the installer.
+# Self-update check (GitHub Releases API). Startup call stays silent/optional
+# (never blocks the installer if unconfigured or offline); the "Check for
+# Updates" button below calls the same function on demand and actually tells
+# the player what happened either way, instead of only working invisibly.
 # ---------------------------------------------------------------------------
-$UpdateAvailable = $null
-if ($GithubRepo) {
+function Test-ForUpdate {
+    if (-not $GithubRepo) { return $null }
     try {
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubRepo/releases/latest" -TimeoutSec 5 -Headers @{ "User-Agent" = "PGC-SMP-Installer" }
+        $rel = Invoke-ApiWithRetry {
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubRepo/releases/latest" -TimeoutSec 6 -Headers @{ "User-Agent" = "PGC-SMP-Installer" }
+        }
         $latestTag = ($rel.tag_name -replace '^v','')
-        if ($latestTag -and $latestTag -ne $AppVersion) { $UpdateAvailable = $latestTag }
-    } catch { }
+        if ($latestTag -and $latestTag -ne $AppVersion) { return $latestTag }
+        return $null
+    } catch {
+        return $null
+    }
 }
+$UpdateAvailable = Test-ForUpdate
 
 # ---------------------------------------------------------------------------
 # Build the form
 # ---------------------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "PGC SMP Installer v$AppVersion"
-$form.Size = New-Object System.Drawing.Size(620, 733)
+$form.Size = New-Object System.Drawing.Size(620, 745)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -468,6 +500,18 @@ $btnUninstall.Location = New-Object System.Drawing.Point(475, 625)
 $btnUninstall.Size = New-Object System.Drawing.Size(115, 34)
 $form.Controls.Add($btnUninstall)
 
+$btnVerify = New-Object System.Windows.Forms.Button
+$btnVerify.Text = T "VerifyBtn"
+$btnVerify.Location = New-Object System.Drawing.Point(15, 665)
+$btnVerify.Size = New-Object System.Drawing.Size(160, 30)
+$form.Controls.Add($btnVerify)
+
+$btnCheckUpdate = New-Object System.Windows.Forms.Button
+$btnCheckUpdate.Text = T "CheckUpdateBtn"
+$btnCheckUpdate.Location = New-Object System.Drawing.Point(185, 665)
+$btnCheckUpdate.Size = New-Object System.Drawing.Size(160, 30)
+$form.Controls.Add($btnCheckUpdate)
+
 if (-not (Test-Path $MrpackFile)) {
     [System.Windows.Forms.MessageBox]::Show(
         "No PGC_SMP_1_0_0.mrpack found next to this program.`nClick 'Browse...' next to 'Modpack (.mrpack) file' to select one.",
@@ -533,6 +577,8 @@ $comboLang.Add_SelectedIndexChanged({
     $btnOpenFolder.Text = T "OpenFolder"
     $btnSaveLog.Text = T "SaveLog"
     $btnUninstall.Text = T "Uninstall"
+    $btnVerify.Text = T "VerifyBtn"
+    $btnCheckUpdate.Text = T "CheckUpdateBtn"
     if (-not $script:PackSummary) { $lblSummary.Text = T "MrpackMissing" }
     if (-not $sync -or $sync.Status -eq "Idle" -or $sync.Done) { $lblStatus.Text = T "Ready" }
 })
@@ -573,6 +619,32 @@ $btnSaveLog.Add_Click({
     $sfd.Filter = "Text file (*.txt)|*.txt"
     $sfd.FileName = "PGC_SMP_install_log.txt"
     if ($sfd.ShowDialog() -eq "OK") { $txtLog.Text | Set-Content -Path $sfd.FileName -Encoding UTF8 }
+})
+
+$btnCheckUpdate.Add_Click({
+    if (-not $GithubRepo) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Update checking isn't configured for this build (no `$GithubRepo set).",
+            "PGC SMP Installer", "OK", "Information") | Out-Null
+        return
+    }
+    $btnCheckUpdate.Enabled = $false
+    $btnCheckUpdate.Text = "Checking..."
+    [System.Windows.Forms.Application]::DoEvents()
+    $latest = Test-ForUpdate
+    $btnCheckUpdate.Enabled = $true
+    $btnCheckUpdate.Text = T "CheckUpdateBtn"
+    if ($latest) {
+        $script:UpdateAvailable = $latest
+        $lblSummary.Text = "$($lblSummary.Text -replace '\s*\|\s*Update available:.*$','')   |   Update available: v$latest"
+        [System.Windows.Forms.MessageBox]::Show(
+            "A newer version is available: v$latest (you're on v$AppVersion).",
+            "PGC SMP Installer", "OK", "Information") | Out-Null
+    } else {
+        [System.Windows.Forms.MessageBox]::Show(
+            "You're on the latest version (v$AppVersion).",
+            "PGC SMP Installer", "OK", "Information") | Out-Null
+    }
 })
 
 $btnUninstall.Add_Click({
@@ -636,10 +708,12 @@ $sync = [hashtable]::Synchronized(@{
     OkCount  = 0
     FailCount = 0
     SkipCount = 0
+    MissingCount = 0
+    CorruptCount = 0
 })
 
 $installScript = {
-    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft, $RamGB, $ModNamesMap)
+    param($sync, $InstallDir, $UseOfficial, $MrpackFile, $WorkDir, $McVersion, $ForgeVersion, $ForgeFullVersion, $ForgeVersionId, $DotMinecraft, $RamGB, $ModNamesMap, $VerifyOnly)
 
     function Log($m)      { $sync.Log.Add($m) | Out-Null }
     function SetProgress($p) { $sync.Progress = [int]$p }
@@ -764,10 +838,12 @@ $installScript = {
         SetProgress 10
         if ($sync.Cancel) { Log "[!] Cancelled."; $sync.Done = $true; return }
 
-        SetStatus "Unpacking modpack overrides..."
         $extractDir = Join-Path $WorkDir "extracted"
-        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($MrpackFile, $extractDir)
+        if (-not $VerifyOnly) {
+            SetStatus "Unpacking modpack overrides..."
+            if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($MrpackFile, $extractDir)
+        }
         Log "[OK] Pack read: $($index.files.Count) mods, approx $([math]::Round($neededBytes/1MB,1)) MB."
         SetProgress 15
 
@@ -778,11 +854,34 @@ $installScript = {
             $i++
             $relPath = $file.path -replace "/", "\"
             $destPath = Join-Path $InstallDir $relPath
+            $displayName = if ($ModNamesMap.ContainsKey($file.path)) { $ModNamesMap[$file.path] } else { Split-Path $file.path -Leaf }
+            $expectedSha1 = $file.hashes.sha1
+
+            # Verify mode: read-only check against what's already on disk - never
+            # downloads anything. Reports exactly what's missing or corrupt so the
+            # player (or a "Repair" follow-up run) knows precisely what needs fixing,
+            # without redownloading the whole pack to find out.
+            if ($VerifyOnly) {
+                if (-not (Test-Path $destPath)) {
+                    $sync.MissingCount++
+                    Log "[$i/$total] MISSING: $displayName"
+                } else {
+                    $actualSha1 = (Get-FileHash -Path $destPath -Algorithm SHA1).Hash.ToLower()
+                    if ($expectedSha1 -and $actualSha1 -ne $expectedSha1) {
+                        $sync.CorruptCount++
+                        Log "[$i/$total] CORRUPT (hash mismatch): $displayName"
+                    } else {
+                        $sync.OkCount++
+                        Log "[$i/$total] OK: $displayName"
+                    }
+                }
+                SetProgress (15 + [math]::Floor((80.0 * $i / [math]::Max($total,1))))
+                continue
+            }
+
             $destDir = Split-Path -Parent $destPath
             if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
 
-            $displayName = if ($ModNamesMap.ContainsKey($file.path)) { $ModNamesMap[$file.path] } else { Split-Path $file.path -Leaf }
-            $expectedSha1 = $file.hashes.sha1
             $needsDownload = $true
             if (Test-Path $destPath) {
                 $actualSha1 = (Get-FileHash -Path $destPath -Algorithm SHA1).Hash.ToLower()
@@ -817,6 +916,15 @@ $installScript = {
         }
 
         if ($sync.Cancel) { $sync.Done = $true; return }
+
+        if ($VerifyOnly) {
+            SetProgress 100
+            SetStatus "Verification complete."
+            Log ""
+            Log "=== Verify complete: $($sync.OkCount) OK, $($sync.MissingCount) missing, $($sync.CorruptCount) corrupt ==="
+            $sync.Done = $true
+            return
+        }
 
         SetStatus "Copying bundled mods, configs and datapacks..."
         $overridesDir = Join-Path $extractDir "overrides"
@@ -877,7 +985,7 @@ $installScript = {
     }
 }
 
-$btnInstall.Add_Click({
+function Start-InstallRun([bool]$VerifyOnly) {
     $selectedMrpack = $txtMrpack.Text
     if ([string]::IsNullOrWhiteSpace($selectedMrpack) -or -not (Test-Path $selectedMrpack)) {
         [System.Windows.Forms.MessageBox]::Show(
@@ -893,6 +1001,7 @@ $btnInstall.Add_Click({
     }
 
     $btnInstall.Enabled = $false
+    $btnVerify.Enabled = $false
     $btnCancel.Enabled = $true
     $comboLaunchers.Enabled = $false
     $btnBrowse.Enabled = $false
@@ -906,6 +1015,7 @@ $btnInstall.Add_Click({
     $sync.Failed = $false
     $sync.Cancel = $false
     $sync.OkCount = 0; $sync.FailCount = 0; $sync.SkipCount = 0
+    $sync.MissingCount = 0; $sync.CorruptCount = 0
 
     $selectedName = ($script:DetectedPaths.Keys | Select-Object -Index $comboLaunchers.SelectedIndex)
     $useOfficial = $selectedName -like "Official Minecraft Launcher*"
@@ -913,15 +1023,17 @@ $btnInstall.Add_Click({
     $installDir = $txtPath.Text
     $ramGB = [int]$numRam.Value
 
-    $Settings.LastInstallPath = $installDir
-    $Settings.RamGB = $ramGB
-    Save-Settings $Settings
+    if (-not $VerifyOnly) {
+        $Settings.LastInstallPath = $installDir
+        $Settings.RamGB = $ramGB
+        Save-Settings $Settings
+    }
 
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($selectedMrpack).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames) | Out-Null
+    $ps.AddScript($installScript).AddArgument($sync).AddArgument($installDir).AddArgument($useOfficial).AddArgument($selectedMrpack).AddArgument($WorkDir).AddArgument($McVersion).AddArgument($ForgeVersion).AddArgument($ForgeFullVersion).AddArgument($ForgeVersionId).AddArgument($dotMinecraft).AddArgument($ramGB).AddArgument($script:ModDisplayNames).AddArgument($VerifyOnly) | Out-Null
     $asyncResult = $ps.BeginInvoke()
 
     $timer = New-Object System.Windows.Forms.Timer
@@ -941,6 +1053,7 @@ $btnInstall.Add_Click({
             $ps.Dispose()
             $rs.Close()
             $btnInstall.Enabled = $true
+            $btnVerify.Enabled = $true
             $btnCancel.Enabled = $false
             $comboLaunchers.Enabled = $true
             $btnBrowse.Enabled = $true
@@ -948,8 +1061,22 @@ $btnInstall.Add_Click({
             $btnRescan.Enabled = $true
             $btnUninstall.Enabled = $true
             if (Test-Path $installDir) { $btnOpenFolder.Enabled = $true }
+
             if ($sync.Cancel) {
-                [System.Windows.Forms.MessageBox]::Show("Installation cancelled.", "PGC SMP Installer", "OK", "Warning") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Cancelled.", "PGC SMP Installer", "OK", "Warning") | Out-Null
+            } elseif ($VerifyOnly) {
+                $needsRepair = ($sync.MissingCount -gt 0 -or $sync.CorruptCount -gt 0)
+                $summary = "$($sync.OkCount) file(s) OK, $($sync.MissingCount) missing, $($sync.CorruptCount) corrupt."
+                if ($needsRepair) {
+                    $choice = [System.Windows.Forms.MessageBox]::Show(
+                        "$summary`n`nRepair now? This only re-downloads the missing/corrupt files - everything already OK is left untouched.",
+                        "PGC SMP Installer", "YesNo", "Warning")
+                    if ($choice -eq "Yes") {
+                        Start-InstallRun $false
+                    }
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show("$summary`n`nEverything checks out.", "PGC SMP Installer", "OK", "Information") | Out-Null
+                }
             } elseif ($sync.Failed) {
                 [System.Windows.Forms.MessageBox]::Show("Installation finished with errors - check the log.", "PGC SMP Installer", "OK", "Warning") | Out-Null
             } else {
@@ -958,7 +1085,10 @@ $btnInstall.Add_Click({
         }
     })
     $timer.Start()
-})
+}
+
+$btnInstall.Add_Click({ Start-InstallRun $false })
+$btnVerify.Add_Click({ Start-InstallRun $true })
 
 $btnCancel.Add_Click({
     $sync.Cancel = $true
